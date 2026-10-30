@@ -1,0 +1,7 @@
+pipecat-ai[google,whisper]
+silero-vad
+piper
+requests
+python-dotenv
+loguru
+# sur RPi 4 : sudo apt install portaudio19-dev libasound2-dev
