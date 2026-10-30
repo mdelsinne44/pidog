@@ -1,5 +1,5 @@
 [Unit]
-Description=PiDog Agent (cli + voice stream)
+Description=PiDog Agent voice stream
 After=network-online.target pidog-monitor.service
 Wants=network-online.target
 Restart=on-failure
@@ -9,7 +9,8 @@ RestartSec=10
 Type=simple
 WorkingDirectory=/home/mdelsinne/pidog/extensions/pidog-agent
 Environment=LLM_LOCAL_DIR=/home/mdelsinne/models/llm-local
-ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/cli/pidog_cli.py
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/voice/assistant_stream.py
 StandardOutput=journal
 StandardError=journal
 
