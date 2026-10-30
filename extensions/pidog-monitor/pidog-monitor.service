@@ -1,0 +1,20 @@
+[Unit]
+Description=PiDog Monitor - sondes et auto-repair
+After=network-online.target
+Wants=network-online.target
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh
+Environment=PIDOG_MONITOR_INTERVAL=30
+StandardOutput=journal
+StandardError=journal
+# Watchdog non-freeze : heartbeat écrit par le script
+WatchdogSec=45
+
+[Install]
+WantedBy=multi-user.target
