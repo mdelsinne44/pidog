@@ -261,6 +261,11 @@ class Pidog():
         self.exit_flag = False
         self.action_threads_start()
         self.sensory_process_start()
+        # Stabilisation tete au demarrage (fix vibration servo)
+        try:
+            self.stable()
+        except Exception:
+            pass
 
     def read_distance(self):
         return round(self.distance.value, 2)
@@ -293,6 +298,11 @@ class Pidog():
                 self.action_threads_start()
             
             self.stop_and_lie()
+            # Stabilisation tete avant arret (fix vibration)
+            try:
+                self.stable()
+            except Exception:
+                pass
             self.close_all_thread()
 
             self.legs_thread.join()
@@ -527,6 +537,11 @@ class Pidog():
         self.legs_speed = speed
         with self.legs_thread_lock:
             self.legs_action_buffer += target_angles
+        # Stabilisation tete apres mouvement jambes (evite vibration post-stand/sit)
+        try:
+            self.stable()
+        except Exception:
+            pass
         
     def head_rpy_to_angle(self, target_yrp, roll_comp=0, pitch_comp=0):
         yaw, roll, pitch = target_yrp
@@ -547,6 +562,17 @@ class Pidog():
 
         with self.head_thread_lock:
             self.head_action_buffer += angles
+
+    def stable(self):
+        # Micro-mouvement de stabilisation pour casser la resonance du servo
+        # de tete. La tete est lourde (inertie) : le servo depasse la cible
+        # (overshoot), corrige en sens inverse, et le cycle peut s'auto-entretenir.
+        # Ce micro-mouvement lent renvoie la tete sur [0,0,0] et dissipe l'energie.
+        try:
+            self.head_move([[5, 5, 5], [0, 0, 0]], speed=10)
+            self.wait_all_done()
+        except Exception:
+            pass
 
     def head_move_raw(self, target_angles, immediately=True, speed=50):
         if immediately == True:
@@ -613,6 +639,8 @@ class Pidog():
             self.tail_move([[0, 0, 0]], speed)
             self.wait_all_done()
             sleep(0.1)
+            # Fix vibration : stabilisation apres retour position
+            self.stable()
         except Exception as e:
             error(f'\rstop_and_lie error:{e}')
 
@@ -628,7 +656,14 @@ class Pidog():
         if not is_run_with_root and not hasattr(self, "speak_first"):
             self.speak_first = True
             warn("Play sound needs to be run with sudo.")
-        status, _ = utils.run_command('sudo killall pulseaudio') # Solve the problem that there is no sound when running in the vnc environment
+        # NEUTRALISE (2026-10-17) : SunFounder executait ici
+        #   sudo killall pulseaudio
+        # a CHAQUE speak(), inconditionnellement. Comme /etc/sudoers.d/010_pi-nopasswd
+        # accorde NOPASSWD: ALL, le kill aboutissait toujours et tuait la session
+        # audio de l'utilisateur (disparition des peripheriques HDMI et Bluetooth
+        # dans la liste de sortie). Le son du chien est joue par pygame via ALSA
+        # (pcm.!default robothat -> HifiBerry) et n'a pas besoin de cette action.
+        status = 0  # pulseaudio tuage volontairement desactive
 
         if os.path.isfile(name):
             self.music.sound_play_threading(name, volume)
@@ -652,7 +687,14 @@ class Pidog():
         if not is_run_with_root and not hasattr(self, "speak_first"):
             self.speak_first = True
             warn("Play sound needs to be run with sudo.")
-        _status, _ = utils.run_command('sudo killall pulseaudio') # Solve the problem that there is no sound when running in the vnc environment
+        # NEUTRALISE (2026-10-17) : SunFounder executait ici
+        #   sudo killall pulseaudio
+        # a CHAQUE speak(), inconditionnellement. Comme /etc/sudoers.d/010_pi-nopasswd
+        # accorde NOPASSWD: ALL, le kill aboutissait toujours et tuait la session
+        # audio de l'utilisateur (disparition des peripheriques HDMI et Bluetooth
+        # dans la liste de sortie). Le son du chien est joue par pygame via ALSA
+        # (pcm.!default robothat -> HifiBerry) et n'a pas besoin de cette action.
+        _status = 0  # pulseaudio tuage volontairement desactive
         
         if os.path.isfile(name):
             self.music.sound_play(name, volume)
