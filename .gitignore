@@ -4,3 +4,12 @@ photo
 test/photo*
 test/scene/*
 backups/*
+
+# Secrets — ne jamais committer
+.env
+__pycache__/
+
+# Logs de session CLI — jamais committés (traces perso + chemins locaux)
+extensions/pidog-agent/cli/*.log
+**/cli_conversation.log
+**/debug_trace.log
