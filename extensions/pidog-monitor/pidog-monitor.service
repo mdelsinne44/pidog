@@ -2,19 +2,22 @@
 Description=PiDog Monitor - sondes et auto-repair
 After=network-online.target
 Wants=network-online.target
-Restart=always
-RestartSec=10
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
 Type=simple
+Restart=always
+RestartSec=10
 ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh
 Environment=PIDOG_MONITOR_INTERVAL=30
 StandardOutput=journal
 StandardError=journal
-# Watchdog non-freeze : heartbeat écrit par le script
-WatchdogSec=45
+# NB : log() écrit aussi dans ~/mon-boot.log (historique brown-out conservé,
+# comme le faisait l'ancien moniteur-pidog.service).
+# PAS de WatchdogSec : monitor.sh ne fait pas de sd_notify WATCHDOG=1,
+# systemd le tuait toutes les 45 s (1066 kills watchdog avant correction),
+# ce qui coupait le health_check (sleep 120) en plein milieu.
 
 [Install]
 WantedBy=multi-user.target

@@ -16,7 +16,18 @@
 #  18  = sous-tension + frequence en force  (0x40000)
 # Ici on a vu 0x50000 = bit 16 + bit 18 (sous-tension forcee historiquee).
 
-log() { echo "$(date -Is) $*"; }
+# Journal systemd (stdout) + historique ~/mon-boot.log (comme l'ancien
+# moniteur-pidog). L'append n'est tenté que si le fichier est accessible :
+# lancé à la main par mdelsinne il ne faut pas spammer « Permission denied ».
+MON_BOOT_LOG="${MON_BOOT_LOG:-/home/mdelsinne/mon-boot.log}"
+log() {
+    local line
+    line="$(date -Is) $*"
+    echo "$line"
+    if [ -w "$MON_BOOT_LOG" ] || { touch "$MON_BOOT_LOG" 2>/dev/null && [ -w "$MON_BOOT_LOG" ]; }; then
+        echo "$line" >> "$MON_BOOT_LOG"
+    fi
+}
 
 log "=== moniteur tension demarre (noyau $(uname -r), $(uptime -p 2>/dev/null)) ==="
 
