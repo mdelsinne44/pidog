@@ -2,15 +2,23 @@
 Description=PiDog Agent voice stream
 After=network-online.target pidog-monitor.service
 Wants=network-online.target
-Restart=on-failure
-RestartSec=10
 
 [Service]
 Type=simple
+User=mdelsinne
+Group=mdelsinne
+Restart=always
+RestartSec=60
 WorkingDirectory=/home/mdelsinne/pidog/extensions/pidog-agent
 Environment=LLM_LOCAL_DIR=/home/mdelsinne/models/llm-local
+Environment=PYTHONPATH=/home/mdelsinne/pidog/extensions/pidog-agent
+# pactl n'accède pas au daemon PulseAudio du user sans ces deux variables
+# (sinon « Connection refused » → source BT jamais vue, arrêt en boucle).
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStartPre=/bin/sleep 30
-ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/voice/assistant_stream.py
+ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/voice/pidog_stream.py
 StandardOutput=journal
 StandardError=journal
 

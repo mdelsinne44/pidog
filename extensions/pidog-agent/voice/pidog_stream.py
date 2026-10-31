@@ -18,10 +18,10 @@ Design :
     recognizers (wake + commande) : léger et réactif sur Pi4.
   * Robustesse Bluetooth : parec relancé automatiquement si le flux meurt.
 
-Usage :  python3 assistant_stream.py
+Usage :  python3 pidog_stream.py
 """
 import sys
-sys.path.append(" /home/mdelsinne/\)
+sys.path.append("/home/mdelsinne")  # robot_guardian.py (hors repo)
 from robot_guardian import RobotGuardian
 guardian = RobotGuardian()
 
@@ -48,7 +48,8 @@ SetLogLevel(-1)  # Vosk silencieux (on a nos propres logs)
 BASE = os.path.dirname(os.path.abspath(__file__))
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(BASE, ".env"))
+    load_dotenv(os.path.join(os.path.dirname(BASE), ".env"))  # racine de l'extension
+    load_dotenv(os.path.join(BASE, ".env"))  # éventuel .local dans voice/
 except Exception:
     pass
 
@@ -64,7 +65,7 @@ def _reset_pidog_on_exit():
     except Exception:
         pass
     try:
-        from soundsign import get_pidog
+        from pidog_core import get_pidog
         dog = get_pidog()
         dog.do_action("lie")
         dog.head_move([[0, 0, 0]], immediately=True, speed=3)
@@ -94,7 +95,7 @@ def fix_gpio_busy():
         subprocess.run(["killall", "-SIGTERM", proc], capture_output=True)
     try:
         my_pid = os.getpid()
-        result = subprocess.run(["pgrep", "-f", "assistant_stream.py"],
+        result = subprocess.run(["pgrep", "-f", "pidog_stream.py"],
                               capture_output=True, text=True)
         for line in result.stdout.strip().split("\n"):
             if line.strip() and int(line.strip()) != my_pid:
@@ -151,7 +152,7 @@ SYSTEM_PROMPT = (
     "Tu connais ton créateur : il s'appelle Martin. "
     "Réponds en français, 1 à 2 phrases courtes et naturelles, jamais de listes. "
     "Tu peux aussi inclure un bloc d'action physique entre <<CODE>> et <<END_CODE>> :\n"
-    "<<<CODE>>>\ndog = soundsign.get_pidog()\ndog.do_action('stand')\nreboot()\n<<<END_CODE>>>\n"
+    "<<<CODE>>>\ndog = pidog_core.get_pidog()\ndog.do_action('stand')\nreboot()\n<<<END_CODE>>>\n"
     "Fonctions autorisées (dans <<<CODE>>>) : dog (get_pidog, do_action, head_move), retropie_start, retropie_stop, retropie_game_cmd, retropie_list_cmd, kodi_start, kodi_stop, kodi_tv_on, kodi_tv_off, kodi_video_cmd, kodi_pause, reboot, memory_add, memory_get, memory_check_topic, memory_all, memory_today. "
     "Tu PEUX et DOIS exécuter ces commandes directement dans <<<CODE>>>, même pour assis/debout/couché (!), Kodi, RetroPie, robot, Raspberry, mémoire. N'oublie pas la mémoire : si l'utilisateur te dit 'demain j'ai rdv coiffeur', tu notes avec memory_add('coiffeur','Demain j'ai rdv coiffeur') ET tu le répètes naturellement dans ta réponse (ex 'Bon, je note : demain rdv coiffeur'). Quand il te demande quelque chose sur un sujet mémorisé, relis-le avec memory_get('coiffeur') et réponds en le répétant. "
     "Toutes les commandes passent par toi (LLM) : assis → dog.do_action('sit'), debout → 'stand', couché → 'lie', Kodi→kodi_start, RetroPie→retropie_start, robot→dog.do_action, raspberry→reboot, mémoire→memory_add/get. "
@@ -222,7 +223,7 @@ def _lazy_d():
     global d
     if d is None:
         try:
-            from soundsign import get_pidog
+            from pidog_core import get_pidog
             d = get_pidog()
             print("PiDog connecté (lazy).", flush=True)
         except Exception as e:
@@ -507,6 +508,30 @@ def hard_reset_audio():
     time.sleep(0.5)
 
 
+def ensure_bt_profiles() -> None:
+    """Profils BT imposés : Flip4 → HFP (mic), toute autre carte BT → A2DP.
+
+    Idempotent : appelé au démarrage puis à chaque retry de la source, car
+    PulseAudio peut basculer la carte en a2dp_sink au reconnexion BT.
+    """
+    try:
+        out = subprocess.run(["pactl", "list", "short", "cards"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return
+    jbl = f"bluez_card.{JBL_ADDR}"
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[1].startswith("bluez_card."):
+            continue
+        want = "handsfree_head_unit" if parts[1] == jbl else "a2dp_sink"
+        try:
+            subprocess.run(["pactl", "set-card-profile", parts[1], want],
+                           capture_output=True, timeout=3)
+        except Exception:
+            pass
+
+
 def setup_audio_route() -> str:
     """Force la JBL en HFP (mic + haut-parleur). Retourne la source retenue."""
     # Attendre que la carte BT apparaisse (reconnect après reboot)
@@ -520,13 +545,9 @@ def setup_audio_route() -> str:
             pass
         time.sleep(1)
     try:
-        cards = subprocess.run(["pactl", "list", "short", "cards"],
-                               capture_output=True, text=True, timeout=5).stdout
         # Applique le profile même si la carte semble absente temporairement
-        # (le fix-bt-audio.sh l'a préparée, PulseAudio peut mettre un instant à la voir)
-        subprocess.run(["pactl", "set-card-profile",
-                        f"bluez_card.{JBL_ADDR}", "handsfree_head_unit"],
-                       capture_output=True)
+        # (les profils BT : Flip4 → HFP, le reste → A2DP)
+        ensure_bt_profiles()
         time.sleep(1.5)
         subprocess.run(["pactl", "set-default-sink", JBL_SINK],
                        capture_output=True)
@@ -799,7 +820,7 @@ async def llm_stream_reply(user_text: str):
     if m:
         try:
             import subprocess
-            from soundsign import get_pidog
+            from pidog_core import get_pidog
             dog = get_pidog()
             def retropie_start(): subprocess.run(["systemctl", "start", "retropie"], capture_output=True)
             def retropie_stop(): subprocess.run(["systemctl", "stop", "retropie"], capture_output=True)
@@ -825,7 +846,7 @@ async def llm_stream_reply(user_text: str):
                     pass
                 time.sleep(0.5)
                 try:
-                    from soundsign import release_pidog
+                    from pidog_core import release_pidog
                     release_pidog()
                 except Exception:
                     pass
@@ -849,7 +870,7 @@ async def llm_stream_reply(user_text: str):
                 "__builtins__": None,
                 "dog": dog,
                 "get_pidog": get_pidog,
-                "soundsign": __import__("soundsign"),
+                "pidog_core": __import__("pidog_core"),
                 "retropie_start": retropie_start,
                 "retropie_stop": retropie_stop,
                 "retropie_game_cmd": retropie_game_cmd,
@@ -1042,6 +1063,9 @@ class MicPipeline:
                 # infinie au boot si la JBL n'est pas connectée)
                 if not await wait_for_source(self.source, timeout=5):
                     missing_count += 1
+                    # PulseAudio a peut-être rebasculé la Flip4 en A2DP au
+                    # reconnexion BT → on réimpose Flip4=HFP / autres=A2DP.
+                    ensure_bt_profiles()
                     print(f"Source BT pas prête ({missing_count}/5)…", flush=True)
                     if missing_count >= 5:
                         print("JBL / micro indisponible après plusieurs essais — arrêt propre du service assistant (pas de boucle).", flush=True)
@@ -1193,10 +1217,26 @@ class MicPipeline:
         await say("Je n'ai rien entendu.")
         led("black", 0)
 
+    async def announce_ready(self):
+        """Annonce vocale quand PiDog est réellement prêt à dialoguer.
+
+        Déclenchée après le PREMIER flux audio reçu par parec (donc carte
+        HFP posée + micro en écoute effective) : sans ça, impossible de
+        savoir depuis l'extérieur si l'assistant est en état de parler.
+        """
+        print("  [PRÊT] micro en écoute → annonce vocale.", flush=True)
+        led("blue", 0.8)
+        await say("Je suis prêt à échanger. Dis PiDog pour me parler.")
+
     # -- boucle principale --
     async def run(self):
         print("Veille : dis « PiDog » pour me réveiller.", flush=True)
+        ready_announced = False
         async for data in self.frames():
+            if not ready_announced:
+                # frames() n'a yieldé qu'une fois parec productif : tout est OK
+                ready_announced = True
+                spawn(self.announce_ready())
             # Pendant la playback : on consomme le flux pour vider le buffer
             # PulseAudio, mais on ne reconnaît pas (anti-écho JBL↔micro).
             if SPEAKING:
@@ -1252,7 +1292,10 @@ async def main():
     global last_activity, PIPELINE
     hard_reset_audio()  # kill tout + JBL + mute le Pi intégré cassé
     await asyncio.sleep(5)
-    source = JBL_SOURCE  # le fix-bt-audio.sh a déjà configuré le profile
+    # Fix-bt-audio.sh n'existe plus : on force les profils ici (bloquant,
+    # donc hors loop asyncio). Flip4 → HFP, autres cartes BT → A2DP.
+    await asyncio.to_thread(setup_audio_route)
+    source = JBL_SOURCE  # micro = source HFP de la Flip4
     # Reveille la source JBL (elle passe en SUSPENDED sans flux)
     if source:
         try:
