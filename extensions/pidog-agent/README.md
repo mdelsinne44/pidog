@@ -6,7 +6,7 @@
 - Actions: RetroPie/EmuStation, radio (Kodi), meteo, chien sit/debout/LED
 - Émotions: Groq écrit `[JOIE]`, `[TRISTE]`, `[COLERE]`, `[SURPRISE]`,
   `[CURIEUX]`, `[EXCITE]`, `[FATIGUE]`, `[CALME]`, `[NEUTRE]` dans sa
-  réponse ; `assistant_stream.py` retire ces balises du texte parlé et les
+  réponse ; `pidog_stream.py` retire ces balises du texte parlé et les
   traduit en mouvements (tête, queue, posture, son, LED) + prosodie Piper.
 - Watchdog 30s → reset PiDog + libère RAM/process ; réveil : "PiDog" ou 2 claps
 - Discussion continue : après une réponse du LLM, le micro se rouvre tout seul

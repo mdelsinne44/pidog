@@ -42,7 +42,7 @@ def net_ip():
 
 def dog_status():
     try:
-        from soundsign import get_pidog
+        from pidog_core import get_pidog
         d = get_pidog()
         return "PiDog robot présent et connecté."
     except Exception:

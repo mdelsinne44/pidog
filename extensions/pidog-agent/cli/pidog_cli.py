@@ -11,9 +11,17 @@ pidog_prompt.cli_prompt() — même chien, deux médiums.
 import os, sys, requests
 import datetime
 
+# Modules partagés avec la voix : racine de l'extension (env_vision, memory,
+# pidog_prompt, pidog_core) + voice/ (pidog_self). Nécessaire quand on lance
+# depuis cli/.
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (BASE, os.path.join(BASE, "voice")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(os.path.join(BASE, ".env"))
 except Exception:
     pass
 
@@ -30,6 +38,23 @@ from memory_load import load_memory
 import memory
 
 memory.memory_init()
+# Libération agressive au démarrage (évite les résidus d'une session précédente)
+try:
+    from pidog_core import release_pidog
+    release_pidog()
+except Exception:
+    pass
+
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli_conversation.log")
+DEBUG_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_trace.log")
+
+def log_line(line):
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} — {line}\n")
+
+def debug_log(step, detail=""):
+    with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} [{step}] {detail}\n")
 
 
 def ask_llm(text, env_text="", mem_text="", history=None):
@@ -97,6 +122,11 @@ if __name__ == "__main__":
             continue
         if user_input.lower() in ("quit", "q", "exit", "bye"):
             print("Au revoir !")
+            try:
+                from pidog_core import release_pidog
+                release_pidog()
+            except Exception:
+                pass
             break
         # Arrêt complet du service (pas healthcheck en commande directe — interne)
         if any(w in user_input.lower() for w in ("stoppé", "stoppe", "arrête le service",
@@ -104,7 +134,7 @@ if __name__ == "__main__":
                                                  "terminé pour aujourd'hui", "j'arrête")):
             print("→ STOP SERVICE CLI — arrêt complet, RAM/ GPIO libérés, zombies tués (healthcheck interne).")
             try:
-                from soundsign import stop_service as ss
+                from pidog_core import stop_service as ss
                 ss()
             except Exception as e:
                 print("Stop CLI:", e)
@@ -112,97 +142,24 @@ if __name__ == "__main__":
 
         mem_text = build_memory_text()
         history.append({"role": "user", "content": user_input})
-        reply = ask_llm(user_input, env_text=ENV_TEXT, mem_text=mem_text, history=history[-10:])
+        debug_log("ASK_LLM_START", f"msg={user_input!r} env={ENV_TEXT[:60]} mem={mem_text[:60]}")
+        try:
+            reply = ask_llm(user_input, env_text=ENV_TEXT, mem_text=mem_text, history=history[-10:])
+            debug_log("ASK_LLM_END", f"len_reply={len(reply)} code_block={'<<<CODE>>>' in reply}")
+        except Exception as e:
+            try:
+                from pidog_core import release_pidog
+                release_pidog()
+            except Exception:
+                pass
+            print(f"[ERREUR] {e}")
+            reply = f"[ERREUR] {e}"
         history.append({"role": "assistant", "content": reply})
 
         import re
         m = re.search(r"<<<CODE>>>(.*?)<<<END_CODE>>>", reply, re.DOTALL)
-        if m:
-            code = m.group(1).strip()
-            clean_reply = reply[:m.start()] + reply[m.end():]
-            clean_reply = clean_reply.strip()
-            try:
-                import subprocess
-                from soundsign import get_pidog
-                dog = get_pidog()
-
-                def retropie_start(): subprocess.run(["systemctl", "start", "retropie"], capture_output=True)
-                def retropie_stop(): subprocess.run(["systemctl", "stop", "retropie"], capture_output=True)
-                def retropie_game_cmd(game=""): pass  # placeholder
-                def retropie_list_cmd(): pass
-                def kodi_start(): subprocess.run(["systemctl", "start", "kodi"], capture_output=True)
-                def kodi_stop(): subprocess.run(["systemctl", "stop", "kodi"], capture_output=True)
-                def kodi_tv_on(): pass
-                def kodi_tv_off(): pass
-                def kodi_video_cmd(): pass
-                def kodi_pause(): pass
-                # reboot / shutdown RETIRES (demande de Martin, 2026-10-30)
-
-                # Mémoire SQLite (base existante dans GoogleDrive)
-                def memory_add(key, value): memory.memory_add(str(key), str(value))
-                def memory_get(key=""):
-                    rows = memory.memory_get(str(key) if key else None)
-                    return [(k, v, u) for k, v, u in rows]
-                def memory_check_topic(topic=""):
-                    return memory.memory_check_topic(str(topic))
-                def memory_all():
-                    return memory.memory_get()
-                def memory_today():
-                    return memory.memory_for_date(datetime.datetime.now().strftime("%Y-%m-%d"))
-
-                def stop_service():
-                    import subprocess, time, gc, os, sys
-                    print("[CLI] stop_service — arrêt complet (healthcheck interne tué, pas voice/cli)", flush=True)
-                    for p in ("parec","aplay","mpv","piper","python3"):
-                        subprocess.run(["killall","-SIGTERM",p], capture_output=True)
-                    try:
-                        subprocess.run(["systemctl","stop","moniteur-pidog"], capture_output=True, timeout=3)
-                        subprocess.run(["systemctl","stop","pidog-health"], capture_output=True, timeout=3)
-                    except Exception:
-                        pass
-                    time.sleep(0.5)
-                    try:
-                        from soundsign import release_pidog
-                        release_pidog()
-                    except Exception:
-                        pass
-                    try:
-                        gc.collect()
-                    except Exception:
-                        pass
-
-                env = {
-                    "__builtins__": None,
-                    "dog": dog,
-                    "get_pidog": get_pidog,
-                    "soundsign": __import__("soundsign"),
-                    "retropie_start": retropie_start,
-                    "retropie_stop": retropie_stop,
-                    "retropie_game_cmd": retropie_game_cmd,
-                    "retropie_list_cmd": retropie_list_cmd,
-                    "kodi_start": kodi_start,
-                    "kodi_stop": kodi_stop,
-                    "kodi_tv_on": kodi_tv_on,
-                    "kodi_tv_off": kodi_tv_off,
-                    "kodi_video_cmd": kodi_video_cmd,
-                    "kodi_pause": kodi_pause,
-                    "stop_service": stop_service,
-                    "memory_add": memory_add,
-                    "memory_get": memory_get,
-                    "memory_check_topic": memory_check_topic,
-                    "memory_all": memory_all,
-                    "memory_today": memory_today,
-                    "self_info": self_info,
-                    "datetime": datetime,
-                }
-                for line in code.splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    exec(line, env)
-                print(clean_reply if clean_reply else "(action exécutée)")
-            except Exception as e:
-                print(clean_reply if clean_reply else reply)
-                print(f"[ACTION] Erreur robot : {e}")
-        else:
-            print(reply)
+        # Bloc code désactivé — évite le blocage get_pidog() / GPIO busy
+        clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
+        clean_reply = clean_reply.strip()
+        log_line(f"IN={user_input!r} OUT={clean_reply!r}")
+        print(clean_reply if clean_reply else reply, flush=True)
