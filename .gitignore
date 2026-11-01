@@ -13,3 +13,7 @@ __pycache__/
 extensions/pidog-agent/cli/*.log
 **/cli_conversation.log
 **/debug_trace.log
+
+# Modèles TTS/STT volumineux (Piper onnx + Vosk) — déplacés ici le 01/11/2026, jamais committés
+extensions/pidog-agent/models/
+extensions/pidog-monitor/*.log

@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.join(os.path.dirname(__file__).replace("pidog-voice-assistant", "GoogleDrive"), "memory.db")
+DB_PATH = "/home/mdelsinne/GoogleDrive/memory.db"
 # Si le chemin calculé n'existe pas, retomber sur le dossier GoogleDrive absolu connu
 if not os.path.isfile(DB_PATH):
     DB_PATH = "/home/mdelsinne/GoogleDrive/memory.db"

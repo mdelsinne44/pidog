@@ -89,7 +89,7 @@ def stop_service():
     import subprocess, time, gc, sys, os, signal
     print("[STOP SERVICE] Arrêt du service PiDog...", flush=True)
     # Créer le flag STOPPED (le healthcheck le relit au prochain cycle)
-    STOPPED_FLAG = "/home/mdelsinne/pidog-voice-assistant/.assistant_stopped"
+    STOPPED_FLAG = "/home/mdelsinne/pidog/extensions/pidog-agent/.assistant_stopped"
     try:
         Path(STOPPED_FLAG).touch()
     except Exception:
@@ -97,12 +97,9 @@ def stop_service():
     # 1) Audio
     for proc in ("parec", "aplay", "mpv", "piper", "python3"):
         subprocess.run(["killall", "-SIGTERM", proc], capture_output=True)
-    # Healthcheck interne (PAS exposé au voice ni CLI)
-    try:
-        subprocess.run(["systemctl", "stop", "moniteur-pidog"], capture_output=True, timeout=3)
-        subprocess.run(["systemctl", "stop", "pidog-health"], capture_output=True, timeout=3)
-    except Exception:
-        pass
+    # Healthcheck interne : purgé le 01/11/2026 (pidog-health / moniteur-pidog
+    # supprimés) — plus rien à arrêter ici. Le moniteur tension
+    # (pidog-monitor.service) reste actif par construction.
     time.sleep(0.5)
     # 2) Zombies / concurrents pidog_stream + GPIO zombies
     try:
@@ -148,9 +145,10 @@ def stop_service():
                     pass
     except Exception:
         pass
-    # 3) Services principaux
+    # 3) Services principaux (l'assistant vocal s'appelle pidog-agent.service
+    #    depuis la migration du 01/11/2026 ; l'ancien pidog-stream est purgé)
     try:
-        subprocess.run(["systemctl", "stop", "pidog-stream"], capture_output=True, timeout=5)
+        subprocess.run(["systemctl", "stop", "pidog-agent"], capture_output=True, timeout=5)
     except Exception:
         pass
     try:

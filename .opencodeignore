@@ -1,0 +1,12 @@
+venv/
+.git/
+*.wav
+*.mp3
+*.log
+__pycache__/
+*.onnx
+.env
+*.tmp
+# Modèles TTS/STT (187 Mo) — indexation inutile
+extensions/pidog-agent/models/
+sounds/

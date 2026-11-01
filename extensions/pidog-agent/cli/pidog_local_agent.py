@@ -18,7 +18,7 @@ RULES = [
     ('PulseAudio', 'pulseaudio --start || true'),
     ('Wifi', 'sudo ip link set wlan0 up || true'),
     ('SSH', 'sudo systemctl restart ssh'),
-    ('Assistant', 'sudo systemctl restart pidog-stream.service'),
+    ('Assistant', 'sudo systemctl restart pidog-agent.service'),
 ]
 
 def has_internet(wait=3):
