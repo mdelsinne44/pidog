@@ -130,7 +130,7 @@ JBL_SINK = f"bluez_sink.{JBL_ADDR}.handsfree_head_unit"
 JBL_SOURCE = f"bluez_source.{JBL_ADDR}.handsfree_head_unit"
 
 RATE = 8000  # JBL HFP (micro + sortie) en 8 kHz mono
-CHUNK_BYTES = 4000          # 125 ms en s16le mono (bon compromis latence/vosk)
+CHUNK_BYTES = 2000          # 250 ms en s16le mono — plus réactif pour Vosk endpointing
 WAKE_GRAMMAR = json.dumps(
     ["pi dog", "pi dogue", "pidog", "pi dogue"])
 
@@ -141,6 +141,11 @@ CONVERSATION_SETTLE_SEC = 0.45   # laisse retomber l'écho du HP avant d'écoute
 MAX_TTS_SENTENCES = 6       # garde-fou anti-réponse interminable
 WATCHDOG_SEC = 30
 
+# Vosk endpointing : silence requis pour valider une phrase (ms)
+SILENCE_MS = 600            # silence requis avant de valider (ms)
+SILENCE_BYTES = int(SILENCE_MS / 1000 * RATE * 2)  # 960 bytes en s16le mono
+SILENCE_RMS_THRESHOLD = 400  # seuil RMS en dessous duquel on considère le son comme du silence
+
 # Mots qui closent la discussion : on répond puis on rend la parole à la veille.
 CONVERSATION_END_WORDS = (
     "au revoir", "aurevoir", "à plus", "a plus", "bonne nuit", "bonne journée",
@@ -150,7 +155,7 @@ CONVERSATION_END_WORDS = (
 SYSTEM_PROMPT = (
     "Tu es PiDog, un petit chien robot amical basé sur une Raspberry Pi 4. "
     "Tu connais ton créateur : il s'appelle Martin. "
-    "Réponds en français, 1 à 2 phrases courtes et naturelles, jamais de listes. "
+    "Réponds en français, 1 à 2 phrases très courtes et naturelles (max 20 mots), jamais de listes. "
     "Tu peux aussi inclure un bloc d'action physique entre <<CODE>> et <<END_CODE>> :\n"
     "<<<CODE>>>\ndog = pidog_core.get_pidog()\ndog.do_action('stand')\nreboot()\n<<<END_CODE>>>\n"
     "Fonctions autorisées (dans <<<CODE>>>) : dog (get_pidog, do_action, head_move), retropie_start, retropie_stop, retropie_game_cmd, retropie_list_cmd, kodi_start, kodi_stop, kodi_tv_on, kodi_tv_off, kodi_video_cmd, kodi_pause, reboot, memory_add, memory_get, memory_check_topic, memory_all, memory_today. "
@@ -205,7 +210,7 @@ EMOTION_STYLE = {
     "CURIEUX":  (1.02, "cyan",    0.35),
     "FATIGUE":  (1.18, "blue",    0.18),
     "CALME":    (1.06, "green",   0.20),
-    "NEUTRE":   (1.00, "black",   0.0),
+    "NEUTRE":     (0.90, "black",   0.0),
 }
 
 tts_queue: "asyncio.Queue[str]" = asyncio.Queue(maxsize=20)
@@ -594,13 +599,17 @@ def start_parec(source: str) -> asyncio.subprocess.Process:
 
 
 # ------------------------------------------------------------------- TTS ---
-def piper_synth(text: str, out_path: str, length_scale: float = 1.0):
+def piper_synth(text: str, out_path: str, length_scale: float = 0.85):
     """Synthèse d'UNE phrase via le binaire Piper (bloquant → to_thread).
 
     `length_scale` module le débit : < 1 plus rapide/énergique, > 1 plus lent.
+    --noise-scale / --noise-w réduisent la charge de calcul du générateur.
     """
     cmd = [PIPER_BIN, "--model", VOICE,
-           "--length_scale", f"{length_scale:.3f}"]
+           "--length_scale", f"{length_scale:.3f}",
+           "--noise-scale", "0.333",
+           "--noise-w-scale", "0.333",
+           "--sentence-silence", "0.2"]
     if VOICE_JSON:
         cmd += ["--config", VOICE_JSON]
     cmd += ["--output_file", out_path]
@@ -756,7 +765,7 @@ async def llm_stream_reply(user_text: str):
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"},
                 json={"model": LLM_MODEL, "messages": messages,
-                      "max_tokens": 180, "temperature": 0.5, "stream": True},
+                      "max_tokens": 110, "temperature": 0.3, "stream": True},
                 stream=True, timeout=30)
             if r.status_code != 200:
                 print(f"LLM HTTP {r.status_code}: {r.text[:150]}", flush=True)
@@ -787,7 +796,8 @@ async def llm_stream_reply(user_text: str):
                     loop.call_soon_threadsafe(queue_emotion, emo)
                 # 2) Dès qu'une phrase complète est là, elle part au TTS
                 while True:
-                    m = re.search(r"[.!?…]\s", buf)
+                    # Détecte les fins de phrase : . ! ? … (trois points) + éventuellement des espaces
+                    m = re.search(r"([.!?…]{1,3})\s*", buf)
                     if not m:
                         break
                     sentence = buf[:m.end()].strip()
@@ -838,12 +848,8 @@ async def llm_stream_reply(user_text: str):
                 print("[CODE] stop_service appelé", flush=True)
                 for p in ("parec","aplay","mpv","piper","python3"):
                     subprocess.run(["killall","-SIGTERM",p], capture_output=True)
-                # Healthcheck tué (interne, pas voice/cli)
-                try:
-                    subprocess.run(["systemctl","stop","moniteur-pidog"], capture_output=True, timeout=3)
-                    subprocess.run(["systemctl","stop","pidog-health"], capture_output=True, timeout=3)
-                except Exception:
-                    pass
+                # Healthcheck interne purgé le 01/11/2026 (pidog-health /
+                # moniteur-pidog supprimés) : plus rien à arrêter ici.
                 time.sleep(0.5)
                 try:
                     from pidog_core import release_pidog
@@ -905,14 +911,15 @@ async def llm_stream_reply(user_text: str):
     last_activity = time.time()
 
 
+# Le TTS commence presque immédiatement, on attend la fin de la playback
 async def wait_speech_then_followup():
     """Après une réponse : attend la fin de la parole puis rouvre le micro.
 
     C'est ce qui permet une vraie discussion : on peut enchaîner sans redire
     « PiDog ». Le pipeline refermera l'écoute après CONVERSATION_TIMEOUT_SEC.
     """
-    await asyncio.sleep(0.2)  # laisse le TTS démarrer (pending_audio)
-    for _ in range(300):
+    # Attendre la fin de tout le TTS (synthèse + lecture) puis rouvrir le micro
+    for _ in range(500):  # max 50 s
         if (not SPEAKING and pending_audio == 0
                 and tts_queue.empty() and audio_queue.empty()):
             break
@@ -1037,7 +1044,8 @@ class MicPipeline:
         self.model = Model(VOSK_MODEL_DIR)
         print(f"Vosk chargé : {VOSK_MODEL_DIR}", flush=True)
         self.wake_rec = KaldiRecognizer(self.model, RATE)
-        self.wake_rec.SetWords(["pi", "dog", "dogue", "pi dogue", "pidog", "pi dog"])
+        # Vocabulaire connu du modèle + variantes attendues
+        self.wake_rec.SetWords(["pi", "dog", "dogue", "pi dog", "pi dogue"])
         self.wake_rec.SetGrammar(WAKE_GRAMMAR)
         # Grammaire contrainte sur vocabulaire présent : "pi dog" reconnu
         self.cmd_rec: Optional[KaldiRecognizer] = None
@@ -1045,10 +1053,12 @@ class MicPipeline:
         self.listen_start = 0.0
         self.listen_timeout = LISTEN_TIMEOUT_SEC
         self.followup = False          # écoute enchaînée (sans wake word)
-        self.followup_pending = False  # à rouvrir dès que le HP se tait
+        self.followup_pending = False  # à rouvrir dès que le HP se tient
         self.followup_ready_at = 0.0
         self.last_partial_log = 0.0
         self.wake_reset_at = time.time()
+        self._silence_start = None     # pour endpointing par silence
+        self._has_speech = False      # indique si du son a été détecté
 
     # -- entrée audio (parec asynchrone, redémarré si le flux BT meurt) --
     async def frames(self):
@@ -1114,7 +1124,8 @@ class MicPipeline:
         # Réveil rapide aussi sur PartialResult (avant endpoint)
         partial_text = json.loads(self.wake_rec.PartialResult())
         partial = partial_text.get("partial", partial_text.get("text", "")).strip().lower()
-        if any(w in partial for w in ("pidog", "pi dog", "pi dogue", "dogue")) and "pi" in partial:
+        # Détecte "pi dog" / "pi dogue" même si reconnus séparément
+        if ("pi" in partial and any(d in partial for d in ("dog", "dogue"))) or "pidog" in partial:
             print(f"★ RÉVEIL partiel ({partial})", flush=True)
             self.wake_rec.Reset()
             self.enter_listen()
@@ -1134,13 +1145,16 @@ class MicPipeline:
         last_activity = time.time()
         self.state = self.LISTEN
         self.cmd_rec = KaldiRecognizer(self.model, RATE)
-        # Pas de SetEndpointing (non dispo dans cette version Vosk)
+        # Pas de SetEndpointing (non dispo dans cette version Vosk) — on gère
+        # l'endpointing nous-mêmes par détection de silence RMS dans listen_step.
         self.chunks = []
         self.listen_start = time.time()
         self.last_partial_log = 0.0
         self.followup = followup
         self.listen_timeout = (CONVERSATION_TIMEOUT_SEC if followup
                                else LISTEN_TIMEOUT_SEC)
+        self._silence_start = None   # pas encore de silence détecté
+        self._has_speech = False    # réinitialiser le suivi du son
         led("cyan" if followup else "magenta")
         print(("→ discussion : à toi…" if followup
                else "→ écoute de la commande…"), flush=True)
@@ -1153,54 +1167,73 @@ class MicPipeline:
         self.followup_ready_at = time.time() + CONVERSATION_SETTLE_SEC
         print("→ discussion : j'écoute (sans « PiDog »)", flush=True)
 
-    # -- écoute : transcription streaming avec endpointing --
+    # -- écoute : transcription streaming avec endpointing silence --
     def listen_step(self, data: bytes):
         now = time.time()
-        if self.cmd_rec.AcceptWaveform(data):
-            piece = json.loads(self.cmd_rec.Result())["text"].strip()
-            if piece:
-                self.chunks.append(piece)
-                text = " ".join(self.chunks)
+        # 1) RMS du chunk courant (détection de silence)
+        rms = _rms(data)
+        is_silent = rms < SILENCE_RMS_THRESHOLD
+
+        # 3) Alimente le recognizer Vosk (une seule fois par chunk)
+        has_result = self.cmd_rec.AcceptWaveform(data)
+        if has_result:
+            res = json.loads(self.cmd_rec.Result())
+            text = res.get("text", "").strip()
+            if text:
+                self.chunks.append(text)
+                self._has_speech = True
+                if now - self.last_partial_log > 0.3:
+                    print(f"  [STT] {text}", flush=True)
+                    self.last_partial_log = now
+        else:
+            partial_res = json.loads(self.cmd_rec.PartialResult())
+            partial = partial_res.get("partial", partial_res.get("text", "")).strip()
+            self._has_speech = bool(partial) or self._has_speech
+            if partial and now - self.last_partial_log > 0.3:
+                print(f"  … {partial}", flush=True)
+                self.last_partial_log = now
+
+        # 4) Endpointing : si silence prolongé + texte partiel reconnu → valide
+        if is_silent:
+            if self._silence_start is None:
+                self._silence_start = now
+            silence_duration = now - self._silence_start
+            # Prendre le partial actuel (texte reconnu mais pas encore validé)
+            partial_now = json.loads(self.cmd_rec.PartialResult()).get("partial", "").strip()
+            if (silence_duration >= SILENCE_MS / 1000.0
+                    and self._has_speech
+                    and partial_now):
+                text = partial_now.strip()
+                if text.strip().lower() == "ainsi":
+                    text = "assis"
+                elif text.strip().lower() == "attire":
+                    text = "assis"
                 if self.followup:
-                    # L'utilisateur peut redire « PiDog » par réflexe : inutile
-                    # de le repasser au LLM, on le retire du début.
                     text = re.sub(
                         r"^\s*(?:ok(?:ay)?\s+)?(?:pi\s*dog(?:ue)?|pidog|pydog"
                         r"|piwog)\b[\s,.:!-]*", "", text, flags=re.I).strip()
-                    if not text:
-                        print("  [STT] (wake word seul) — j'écoute encore",
-                              flush=True)
-                        self.chunks = []
-                        self.listen_start = time.time()
-                        return
-                # Corrige le faux-positif Vosk « ainsi » → « assis » (mot seul)
-                if text.strip().lower() == "ainsi":
-                    text = "assis"
-                if text.strip().lower() == "attire":
-                    text = "assis"
                 print(f"  [STT] {text}", flush=True)
                 was_followup = self.followup
                 self.exit_listen()
                 spawn(handle_utterance(text, followup=was_followup))
-            # chunk vide (bruit/servo) : on continue d'écouter
+                return
         else:
-            partial_res = json.loads(self.cmd_rec.PartialResult())
-            partial = partial_res.get("partial", partial_res.get("text", "")).strip()
-            if partial and now - self.last_partial_log > 0.4:
-                print(f"  … {partial}", flush=True)
-                self.last_partial_log = now
-            if now - self.listen_start > self.listen_timeout:
-                was_followup = self.followup
-                if was_followup:
-                    print("  [DISCUSSION] silence — retour en veille "
-                          "(« PiDog » pour reprendre)", flush=True)
-                else:
-                    print("  [STT] timeout — rien de clair", flush=True)
-                self.exit_listen()
-                if not was_followup:
-                    spawn(self.nothing_heard())
-                else:
-                    mood_led()
+            self._silence_start = None
+
+        # 4) Timeout d'écoute (silence total ou rien de clair)
+        if now - self.listen_start > self.listen_timeout:
+            was_followup = self.followup
+            if was_followup:
+                print("  [DISSCUSION] silence — retour en veille "
+                      "(« PiDog » pour reprendre)", flush=True)
+            else:
+                print("  [STT] timeout — rien de clair", flush=True)
+            self._silence_start = None
+            self.exit_listen()
+            if not was_followup:
+                spawn(self.nothing_heard())
+            else:
+                mood_led()
 
     def exit_listen(self):
         global last_activity
@@ -1285,6 +1318,20 @@ def dog_startup_pose():
         print("Posture init : couché, tête à zéro (servo 0).", flush=True)
     except Exception as e:
         print(f"Posture init : {e}", flush=True)
+
+
+# ------------------------------------------------------- audio utilitaires --
+def _rms(data: bytes) -> float:
+    """RMS du chunk audio s16le mono — pour la détection de silence."""
+    if not data:
+        return 0.0
+    # s16le little-endian
+    import struct
+    n = len(data) // 2
+    samples = struct.unpack(f"<{n}h", data[:n * 2])
+    if not samples:
+        return 0.0
+    return (sum(s * s for s in samples) / len(samples)) ** 0.5
 
 
 # ------------------------------------------------------------------ main ---
