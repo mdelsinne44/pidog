@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PiDog — assistant vocal STREAMING (wake word « PiDog »).
+"""PiDog — agent vocal STREAMING (wake word « PiDog »).
 
 Chaîne temps réel :
     parec (micro JBL, 16 kHz mono, flux permanent)
@@ -228,12 +228,25 @@ def _lazy_d():
     global d
     if d is None:
         try:
-            from pidog_core import get_pidog
-            d = get_pidog()
-            print("PiDog connecté (lazy).", flush=True)
-        except Exception as e:
-            d = None
-            print(f"PiDog absent ({e}) — mode voix seul.", flush=True)
+            import socket, json
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect("/tmp/pidog.sock")
+            payload = (json.dumps({"cmd":"status"}) + "\n").encode()
+            s.sendall(len(payload).to_bytes(4, "big") + payload)
+            s.recv(4)
+            s.close()
+            from pidog.service import my_dog
+            d = my_dog()
+            print("PiDog connecté via service (lazy).", flush=True)
+        except Exception:
+            try:
+                from pidog_core import get_pidog
+                d = get_pidog()
+                print("PiDog connecté (lazy, fallback).", flush=True)
+            except Exception as e2:
+                d = None
+                print(f"PiDog absent — mode voix seul.", flush=True)
     return d
 
 
@@ -906,7 +919,7 @@ async def llm_stream_reply(user_text: str):
         except Exception as e:
             print("[ACTION_STREAM] Erreur robot:", e, flush=True)
     if spoken:
-        history.append({"role": "assistant",
+        history.append({"role": "agent",
                         "content": " ".join(spoken)[:300]})
     last_activity = time.time()
 
@@ -1078,7 +1091,7 @@ class MicPipeline:
                     ensure_bt_profiles()
                     print(f"Source BT pas prête ({missing_count}/5)…", flush=True)
                     if missing_count >= 5:
-                        print("JBL / micro indisponible après plusieurs essais — arrêt propre du service assistant (pas de boucle).", flush=True)
+                        print("JBL / micro indisponible après plusieurs essais — arrêt propre du service agent (pas de boucle).", flush=True)
                         sys.exit(0)
                     await asyncio.sleep(3)
                     continue
@@ -1255,7 +1268,7 @@ class MicPipeline:
 
         Déclenchée après le PREMIER flux audio reçu par parec (donc carte
         HFP posée + micro en écoute effective) : sans ça, impossible de
-        savoir depuis l'extérieur si l'assistant est en état de parler.
+        savoir depuis l'extérieur si l'agent est en état de parler.
         """
         print("  [PRÊT] micro en écoute → annonce vocale.", flush=True)
         led("blue", 0.8)
@@ -1373,7 +1386,7 @@ async def main():
         led("black", 0)
         await asyncio.to_thread(dog_action, "lie")
         dog_head(0, 0)
-        # Stabilisation anti-vibration avant arrêt assistant
+        # Stabilisation anti-vibration avant arrêt agent
         try:
             await asyncio.to_thread(lambda: _lazy_d().stable() if _lazy_d() is not None else None)
         except Exception:

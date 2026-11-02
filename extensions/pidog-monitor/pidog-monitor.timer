@@ -1,11 +1,11 @@
 [Unit]
-Description=PiDog Monitor timer - sondes 30s / checks 2min
+Description=Timer périodique pour pidog-monitor.service (vérification santé)
 
 [Timer]
 OnBootSec=30
-OnUnitActiveSec=30s
-AccuracySec=1s
+OnUnitActiveSec=60min
 Persistent=true
+Unit=pidog-monitor.service
 
 [Install]
 WantedBy=timers.target

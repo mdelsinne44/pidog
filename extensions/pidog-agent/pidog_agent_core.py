@@ -85,11 +85,11 @@ def release_pidog():
 def stop_service():
     """Arrêt complet du service PiDog : audio coupé, GPIO libéré, RAM libérée,
     zombies GPIO tués, robot couché, healthcheck tué (interne, pas voice/cli).
-    Crée un flag STOPPED pour que le healthcheck ne relance pas l'assistant après."""
+    Crée un flag STOPPED pour que le healthcheck ne relance pas l'agent après."""
     import subprocess, time, gc, sys, os, signal
     print("[STOP SERVICE] Arrêt du service PiDog...", flush=True)
     # Créer le flag STOPPED (le healthcheck le relit au prochain cycle)
-    STOPPED_FLAG = "/home/mdelsinne/pidog/extensions/pidog-agent/.assistant_stopped"
+    STOPPED_FLAG = "/home/mdelsinne/pidog/extensions/pidog-agent/.agent_stopped"
     try:
         Path(STOPPED_FLAG).touch()
     except Exception:
@@ -145,7 +145,7 @@ def stop_service():
                     pass
     except Exception:
         pass
-    # 3) Services principaux (l'assistant vocal s'appelle pidog-agent.service
+    # 3) Services principaux (l'agent vocal s'appelle pidog-agent.service
     #    depuis la migration du 01/11/2026 ; l'ancien pidog-stream est purgé)
     try:
         subprocess.run(["systemctl", "stop", "pidog-agent"], capture_output=True, timeout=5)

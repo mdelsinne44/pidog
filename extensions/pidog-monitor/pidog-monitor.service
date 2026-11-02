@@ -1,23 +1,28 @@
 [Unit]
-Description=PiDog Monitor - sondes et auto-repair
-After=network-online.target
+Description=PiDog Monitor - vérification santé au démarrage + état du service robot
+After=network-online.target pidog.service
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
+# Si le service pidog (robot) est absent, le moniteur le signale
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
-Type=simple
-Restart=always
-RestartSec=10
+Type=oneshot
+RemainAfterExit=yes
 ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh
-Environment=PIDOG_MONITOR_INTERVAL=30
+# Vérification du nouveau service pidog (le robot)
+ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog.service || echo "[MONITOR] SERVICE PIDOG INACTIF" | logger -t pidog-monitor'
+# Vérification de l'agent (stream vocal)
+ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog-agent.service && echo "[MONITOR] AGENT ACTIF" || echo "[MONITOR] AGENT INACTIF" | logger -t pidog-monitor'
+# Si le script échoue → système considère comme failed → relance
+Restart=on-failure
+RestartSec=30
+# WatchdogSec : pas de réponse > 120 s → relance
+WatchdogSec=120
+Environment=PIDOG_MONITOR_INTERVAL=60
+Environment=HEALTH_DELAY=120
 StandardOutput=journal
 StandardError=journal
-# NB : log() écrit aussi dans ~/mon-boot.log (historique brown-out conservé,
-# comme le faisait l'ancien moniteur-pidog.service).
-# PAS de WatchdogSec : monitor.sh ne fait pas de sd_notify WATCHDOG=1,
-# systemd le tuait toutes les 45 s (1066 kills watchdog avant correction),
-# ce qui coupait le health_check (sleep 120) en plein milieu.
 
 [Install]
 WantedBy=multi-user.target

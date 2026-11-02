@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """PiDog CLI — mode texte pur pour SSH / terminal.
 
 Usage:
-    python3 pidog_cli.py
+    python3 agent_cli.py
     # puis tapez vos questions ; tapez 'quit' ou Ctrl-D pour sortir.
 
-Le prompt de personnalité est partagé avec l'assistant vocal via
+Le prompt de personnalité est partagé avec l'agent vocal via
 pidog_prompt.cli_prompt() — même chien, deux médiums.
 """
 import os, sys, requests
@@ -33,12 +34,44 @@ from pidog_prompt import cli_prompt
 SYSTEM_PROMPT = cli_prompt()
 
 import env_vision
-from pidog_self import self_info
+from agent_self import self_info
 from memory_load import load_memory
 import memory
 
 memory.memory_init()
+# Vérifier l'état du robot (service / robot GPIO) — nouveau service centralisé
+try:
+    import pidog
+    robot_available = False
+    robot_status = "Pas de robot détecté (service non lancé)"
+    try:
+        dog_proxy = pidog.get_pidog()
+        s = pidog.status()
+        robot_status = s
+        if "running" in s:
+            robot_available = True
+    except Exception as e:
+        robot_status = f"Service inaccessible ({e})"
+except Exception:
+    robot_available = False
+    robot_status = "Module service non importable"
+
+if robot_available:
+    try:
+        self_text = self_info()
+    except Exception:
+        self_text = ""
+    if self_text:
+        SYSTEM_PROMPT += f"\n[MOI : {self_text}]"
+    print("=== PiDog CLI — robot disponible ===")
+    print(f"   État : {robot_status} — vous pouvez discuter ET demander des actions au robot.")
+    SYSTEM_PROMPT += "\n[Le robot PiDog est connecté et peut exécuter des actions physiques via le bloc <<<CODE>>>. Tu peux lui demander : se lever (stand), s'asseoir (sit), faire un geste (do_action), ou bouger la tête (head.move).]"
+else:
+    print("=== PiDog CLI — robot non disponible ===")
+    print(f"   État : {robot_status} — discussion uniquement (pas de bloc <<<CODE>>> actif).")
+    print("   Lancez `pidog start` dans un autre terminal pour activer le robot.")
 # Libération agressive au démarrage (évite les résidus d'une session précédente)
+    SYSTEM_PROMPT += "\n[ATTENTION : le robot PiDog n'est pas connecté. Ne propose pas de bloc <<<CODE>>> dans ta réponse, car il ne pourra pas être exécuté. Réponds uniquement par du texte.]"
 try:
     from pidog_core import release_pidog
     release_pidog()
@@ -144,7 +177,7 @@ if __name__ == "__main__":
         history.append({"role": "user", "content": user_input})
         debug_log("ASK_LLM_START", f"msg={user_input!r} env={ENV_TEXT[:60]} mem={mem_text[:60]}")
         try:
-            reply = ask_llm(user_input, env_text=ENV_TEXT, mem_text=mem_text, history=history[-10:])
+            reply = ask_llm(user_input, env_text=ENV_TEXT, mem_text=mem_text, history=history[-3:])
             debug_log("ASK_LLM_END", f"len_reply={len(reply)} code_block={'<<<CODE>>>' in reply}")
         except Exception as e:
             try:
@@ -154,12 +187,32 @@ if __name__ == "__main__":
                 pass
             print(f"[ERREUR] {e}")
             reply = f"[ERREUR] {e}"
-        history.append({"role": "assistant", "content": reply})
+        history.append({"role": "agent", "content": reply})
 
         import re
         m = re.search(r"<<<CODE>>>(.*?)<<<END_CODE>>>", reply, re.DOTALL)
-        # Bloc code désactivé — évite le blocage get_pidog() / GPIO busy
-        clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
-        clean_reply = clean_reply.strip()
+        # Bloc code : exécuté si le robot est disponible (service lancé)
+        if m and robot_available:
+            try:
+                import pidog
+                dog = pidog.get_pidog()
+                if dog is not None:
+                    dog.command(m.group(1).strip()) if m and m.group(1) else dog.do_action("lie")
+                    clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
+                    clean_reply = clean_reply.strip()
+                    action_str = m.group(1).strip() if m and m.group(1) else 'lie'
+                    log_line(f"IN={user_input!r} OUT=[ACTION EXEC OK] {action_str}")
+                    print("[PI DOG] Action exécutée (robot couché - lie = couché, sit = assis).", flush=True)
+                else:
+                    clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
+                    clean_reply = clean_reply.strip()
+                    print("[PI DOG] Robot indisponible (service non lancé?) — pas d'exécution.", flush=True)
+            except Exception as e:
+                clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
+                clean_reply = clean_reply.strip()
+                print(f"[PI DOG] Échec action (robot/indisponible?) : {e}", flush=True)
+        else:
+            clean_reply = reply[:m.start()] + reply[m.end():] if m else reply
+            clean_reply = clean_reply.strip()
         log_line(f"IN={user_input!r} OUT={clean_reply!r}")
         print(clean_reply if clean_reply else reply, flush=True)

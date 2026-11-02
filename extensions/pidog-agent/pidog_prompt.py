@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prompt PiDog partagé — assistant vocal (pidog_stream.py) + CLI (pidog_cli.py).
+"""Prompt PiDog partagé — assistant vocal (pidog_stream.py) + CLI (agent_cli.py).
 
 Un seul endroit pour la personnalité : les deux canaux parlent au MÊME chien.
 Ce qui change entre eux, c'est le MEDIUM, pas le caractère.
@@ -100,7 +100,7 @@ VISION = (
     "« robot présent »)."
 )
 
-from pidog_self import SELF_SUMMARY as _SELF
+from agent_self import SELF_SUMMARY as _SELF
 
 # Auto-connaissance : hardware + defauts connus (tete qui vibre, speaker HS)
 SELF = (
@@ -143,7 +143,7 @@ def voice_prompt() -> str:
 
 
 def cli_prompt() -> str:
-    """Prompt pour pidog_cli.py — listes acceptées, taquinerie geek."""
+    """Prompt pour agent_cli.py — listes acceptées, taquinerie geek."""
     return "".join([
         IDENTITY,
         SELF,
