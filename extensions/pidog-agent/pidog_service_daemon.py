@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-"""Daemon du service PiDog — reste en vie après le lancement du CLI."""
-import sys, os, time
-sys.path.insert(0, "/home/mdelsinne/pidog")
-from pidog.service import _proxy, _clear_lock, _write_lock_pid, stop
+"""Daemon du service PiDog — possède l'unique Pidog() et le socket.
+
+Ce script est lancé par `pidog start` (détaché) ou par systemd
+(pidog.service). Toute la logique (lock, socket, init, arrêt propre) est
+dans `pidog.service.DogService`.
+"""
+import os
+import sys
+
+REPO_ROOT = "/home/mdelsinne/pidog"
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from pidog.service import run_daemon
 
 if __name__ == "__main__":
-    # Lancer le service (crée le socket + lance le robot au démarrage)
-    _proxy.start(auto_start_robot=True)
-    # Écrire le lockfile du daemon
-    _write_lock_pid()
+    # Un daemon doit être indépendant du terminal qui l'a lancé.
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+        os.setsid()
     except Exception:
         pass
-    finally:
-        _clear_lock()
-        try:
-            _proxy.stop()
-        except Exception:
-            pass
+    sys.exit(run_daemon(auto_start_robot=True))

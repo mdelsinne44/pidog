@@ -22,6 +22,11 @@ Usage :  python3 pidog_stream.py
 """
 import sys
 sys.path.append("/home/mdelsinne")  # robot_guardian.py (hors repo)
+_AGENT_DIR = "/home/mdelsinne/pidog/extensions/pidog-agent"
+_REPO_ROOT = "/home/mdelsinne/pidog"
+for _path in (_REPO_ROOT, _AGENT_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 from robot_guardian import RobotGuardian
 guardian = RobotGuardian()
 
@@ -37,6 +42,8 @@ from typing import Optional
 import env_vision
 from memory_load import load_memory
 import memory
+import stt
+from action_runner import execute_action_block, extract_action_code
 
 memory.memory_init()
 
@@ -65,7 +72,9 @@ def _reset_pidog_on_exit():
     except Exception:
         pass
     try:
-        from pidog_core import get_pidog
+        from pidog import get_pidog, is_ready
+        if not is_ready():
+            return
         dog = get_pidog()
         dog.do_action("sit")
         dog.head_move([[0, 0, 0]], immediately=True, speed=1)
@@ -75,7 +84,7 @@ def _reset_pidog_on_exit():
             pass
         dog.rgb_strip.set_mode(style="listen", color="black", brightness=0)
         print("[atexit] PiDog réinitialisé couché. Mic coupé.", flush=True)
-    except Exception as e:
+    except Exception:
         pass
 
 atexit.register(_reset_pidog_on_exit)
@@ -152,35 +161,16 @@ CONVERSATION_END_WORDS = (
     "bye", "ciao", "salut à toi", "c'est tout", "terminé", "termine",
 )
 
-SYSTEM_PROMPT = (
-    "Tu es PiDog, un petit chien robot amical basé sur une Raspberry Pi 4. "
-    "Tu connais ton créateur : il s'appelle Martin. "
-    "Réponds en français, 1 à 2 phrases très courtes et naturelles (max 20 mots), jamais de listes. "
-    "Tu peux aussi inclure un bloc d'action physique entre <<CODE>> et <<END_CODE>> :\n"
-    "<<<CODE>>>\ndog = pidog_core.get_pidog()\ndog.do_action('stand')\nreboot()\n<<<END_CODE>>>\n"
-    "Fonctions autorisées (dans <<<CODE>>>) : dog (get_pidog, do_action, head_move), retropie_start, retropie_stop, retropie_game_cmd, retropie_list_cmd, kodi_start, kodi_stop, kodi_tv_on, kodi_tv_off, kodi_video_cmd, kodi_pause, reboot, memory_add, memory_get, memory_check_topic, memory_all, memory_today. "
-    "Tu PEUX et DOIS exécuter ces commandes directement dans <<<CODE>>>, même pour assis/debout/couché (!), Kodi, RetroPie, robot, Raspberry, mémoire. N'oublie pas la mémoire : si l'utilisateur te dit 'demain j'ai rdv coiffeur', tu notes avec memory_add('coiffeur','Demain j'ai rdv coiffeur') ET tu le répètes naturellement dans ta réponse (ex 'Bon, je note : demain rdv coiffeur'). Quand il te demande quelque chose sur un sujet mémorisé, relis-le avec memory_get('coiffeur') et réponds en le répétant. "
-    "Toutes les commandes passent par toi (LLM) : assis → dog.do_action('sit'), debout → 'stand', couché → 'lie', Kodi→kodi_start, RetroPie→retropie_start, robot→dog.do_action, raspberry→reboot, mémoire→memory_add/get. "
-    "Regle stricte : traite TOUJOURS la commande physique dans <<<CODE>>>, meme si cest juste assis. Ne dis jamais que tu ne peux pas.\n\n"
-    "TU CONTRÔLES TON CORPS AVEC DES BALISES D'HUMEUR. "
-    "Écris UNE SEULE balise, au tout début de ta réponse (jamais au milieu, "
-    "jamais plusieurs). Balises autorisées : "
-    "[JOIE] (content, blague, bonne nouvelle), [TRISTE] (l'utilisateur est "
-    "triste, mauvaise nouvelle), [COLERE], [SURPRISE], [CURIEUX], "
-    "[EXCITE], [FATIGUE], [CALME], [NEUTRE]. "
-    "Exemple : si l'utilisateur est content, écris [JOIE] dans ta réponse. "
-    "Exemple : « Pidog, je suis triste » -> « [TRISTE] Oh, qu'est-ce qui se "
-    "passe ? ». Les balises sont des ordres pour ton corps : ne les prononce "
-    "jamais, ne les explique jamais, ne mets pas d'espace avant.\n\n"
-    "MODE DISCUSSION : après « PiDog », l'utilisateur peut enchaîner plusieurs "
-    "répliques sans redire le mot de réveil. Tiens compte du contexte des "
-    "échanges précédents et reste naturel ; tu peux poser une petite question "
-    "pour relancer la conversation quand c'est pertinent. Si l'utilisateur "
-    "prend congé, réponds brièvement et termine.\n\n"
-    "VISION ENVIRONNEMENT : tu as accès à l'état local (Bluetooth Flip 4, "
-    "audio PulseAudio, réseau IP, robot PiDog). Quand tu réponds, mentionne brièvement "
-    "l'état pertinent si ça aide (ex. « Flip 4 est connectée » ou « robot présent »)."
-)
+try:
+    from pidog_prompt import voice_prompt
+    SYSTEM_PROMPT = voice_prompt()
+except Exception as _prompt_error:  # secours si l'extension n'est pas sur le path
+    print(f"Prompt partagé indisponible ({_prompt_error}) — prompt minimal.", flush=True)
+    SYSTEM_PROMPT = (
+        "Tu es PiDog, un petit chien robot amical. Réponds en français, "
+        "1 à 2 phrases courtes. Pour agir, écris un bloc <<<CODE>>> avec "
+        "dog.action(...). Ne prononce jamais le contenu du bloc."
+    )
 
 # ----------------------------------------------------------------- globals --
 # Références fortes aux tâches de fond : sinon le GC d'asyncio peut les
@@ -228,25 +218,15 @@ def _lazy_d():
     global d
     if d is None:
         try:
-            import socket, json
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(1.0)
-            s.connect("/tmp/pidog.sock")
-            payload = (json.dumps({"cmd":"status"}) + "\n").encode()
-            s.sendall(len(payload).to_bytes(4, "big") + payload)
-            s.recv(4)
-            s.close()
-            from pidog.service import my_dog
-            d = my_dog()
-            print("PiDog connecté via service (lazy).", flush=True)
-        except Exception:
-            try:
-                from pidog_core import get_pidog
-                d = get_pidog()
-                print("PiDog connecté (lazy, fallback).", flush=True)
-            except Exception as e2:
-                d = None
-                print(f"PiDog absent — mode voix seul.", flush=True)
+            from pidog import get_pidog, is_ready
+            if not is_ready():
+                print("PiDog absent — mode voix seul.", flush=True)
+                return None
+            d = get_pidog()
+            print("PiDog connecté via service partagé (RPC).", flush=True)
+        except Exception as exc:
+            d = None
+            print(f"PiDog absent — mode voix seul ({exc}).", flush=True)
     return d
 
 
@@ -737,7 +717,7 @@ async def weather_reply(text: str) -> str:
         return "La météo n'est pas disponible pour l'instant."
 
 
-async def llm_stream_reply(user_text: str):
+async def llm_stream_reply(user_text: str, action_intent: bool = False):
     """Groq en streaming : chaque phrase part immédiatement dans le TTS."""
     global last_activity
     if not GROQ_KEY:
@@ -767,18 +747,104 @@ async def llm_stream_reply(user_text: str):
         f"[Environnement actuel] {env_text}\n"
         f"[Mémoire] {mem_text}"
     )
+    if action_intent:
+        mood_hint += (
+            "\n[MODE ACTION] Ce message a été précédé de « PiDog » : c'est une "
+            "commande directe pour ton corps. Déduis l'action derrière les mots "
+            "(guirlandes = LED, patte = lift_paw, queue = wag, etc.) et inclus "
+            "un bloc <<<CODE>>> avec dog.action(...)."
+        )
     messages = [{"role": "system", "content": SYSTEM_PROMPT + mood_hint},
                 *history]
     spoken: list[str] = []
+    raw_all = ""
+    code_chunks: list[str] = []
+
+    # Séparation texte / code PENDANT le stream : le bloc d'action ne doit
+    # jamais être prononcé par le TTS, mais il doit être conservé pour être
+    # exécuté à la fin.
+    code_open_re = re.compile(
+        r"<<<\s*CODE\s*>>>|<<\s*CODE\s*>>|```(?:python|py)?\s*\n", re.I)
+    code_close_re = re.compile(
+        r"<<<\s*END_CODE\s*>>>|<<\s*END_CODE\s*>>|\n?```", re.I)
+    partial_open_re = re.compile(
+        r"<<[<\s]*(?:C(?:O(?:D(?:E)?)?)?)?\s*[>\s]*$", re.I)
 
     def _stream():
-        buf, n = "", 0
+        nonlocal raw_all
+        text_buf = ""
+        code_buf = ""
+        in_code = False
+        n = 0
+
+        def consume_text(final: bool = False):
+            nonlocal text_buf, n
+            text_buf, emotions, tag_tail = split_emotion_tags(text_buf)
+            text_buf += tag_tail
+            for emo in emotions:
+                loop.call_soon_threadsafe(queue_emotion, emo)
+
+            hold = ""
+            if not final:
+                # Garde en réserve un éventuel début de <<<CODE>>> coupé
+                # entre deux paquets, sinon le TTS lirait « <<<CO ».
+                pm = partial_open_re.search(text_buf)
+                if pm:
+                    hold = text_buf[pm.start():]
+                    text_buf = text_buf[:pm.start()]
+
+            while True:
+                m = re.search(r"([.!?…]{1,3})\s*", text_buf)
+                if not m:
+                    break
+                sentence = text_buf[:m.end()].strip()
+                text_buf = text_buf[m.end():]
+                if sentence and n < MAX_TTS_SENTENCES:
+                    spoken.append(sentence)
+                    loop.call_soon_threadsafe(tts_queue.put_nowait, sentence)
+                    n += 1
+            if hold:
+                text_buf += hold
+
+        def feed(delta: str):
+            nonlocal raw_all, text_buf, code_buf, in_code
+            raw_all += delta
+            if in_code:
+                code_buf += delta
+                m = code_close_re.search(code_buf)
+                if m:
+                    code_chunks.append(code_buf[:m.start()])
+                    text_buf += code_buf[m.end():]
+                    code_buf = ""
+                    in_code = False
+                    consume_text()
+                return
+
+            text_buf += delta
+            m = code_open_re.search(text_buf)
+            if not m:
+                consume_text()
+                return
+            # Texte avant le bloc : on le prononce tout de suite.
+            after = text_buf[m.end():]
+            text_buf = text_buf[:m.start()]
+            consume_text()
+            in_code = True
+            code_buf = after
+            m2 = code_close_re.search(code_buf)
+            if m2:
+                code_chunks.append(code_buf[:m2.start()])
+                text_buf += code_buf[m2.end():]
+                code_buf = ""
+                in_code = False
+                consume_text()
+
         try:
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"},
                 json={"model": LLM_MODEL, "messages": messages,
-                      "max_tokens": 110, "temperature": 0.3, "stream": True},
+                      "max_tokens": 180, "temperature": 0.3, "stream": True},
                 stream=True, timeout=30)
             if r.status_code != 200:
                 print(f"LLM HTTP {r.status_code}: {r.text[:150]}", flush=True)
@@ -800,124 +866,41 @@ async def llm_stream_reply(user_text: str):
                              .get("content") or "")
                 except Exception:
                     continue
-                buf += delta
-                # 1) On extrait les balises d'humeur au vol : elles pilotent
-                #    le corps et ne doivent jamais être prononcées.
-                buf, emotions, tag_tail = split_emotion_tags(buf)
-                buf += tag_tail
-                for emo in emotions:
-                    loop.call_soon_threadsafe(queue_emotion, emo)
-                # 2) Dès qu'une phrase complète est là, elle part au TTS
-                while True:
-                    # Détecte les fins de phrase : . ! ? … (trois points) + éventuellement des espaces
-                    m = re.search(r"([.!?…]{1,3})\s*", buf)
-                    if not m:
-                        break
-                    sentence = buf[:m.end()].strip()
-                    buf = buf[m.end():]
-                    if sentence:
-                        spoken.append(sentence)
-                        loop.call_soon_threadsafe(tts_queue.put_nowait, sentence)
-                        n += 1
-                    if n >= MAX_TTS_SENTENCES:
-                        return
+                feed(delta)
         except Exception as e:
             print("LLM:", e, flush=True)
             loop.call_soon_threadsafe(tts_queue.put_nowait,
                                       "Je n'ai pas compris.")
             return
-        # Balise éventuellement coupée en fin de flux : on la supprime.
-        rest = re.sub(r"\[[^\]]*$", "", buf)
-        rest, emotions, _ = split_emotion_tags(rest)
-        for emo in emotions:
-            loop.call_soon_threadsafe(queue_emotion, emo)
-        rest = rest.strip()
-        if rest and n < MAX_TTS_SENTENCES:
-            spoken.append(rest)
-            loop.call_soon_threadsafe(tts_queue.put_nowait, rest)
+
+        # Fin de flux : récupère le code sans balise fermante éventuelle.
+        if in_code:
+            code_chunks.append(code_buf)
+        else:
+            consume_text(final=True)
+            rest = text_buf.strip()
+            if rest and n < MAX_TTS_SENTENCES:
+                rest, emotions, _ = split_emotion_tags(rest)
+                for emo in emotions:
+                    loop.call_soon_threadsafe(queue_emotion, emo)
+                rest = rest.strip()
+                if rest:
+                    spoken.append(rest)
+                    loop.call_soon_threadsafe(tts_queue.put_nowait, rest)
 
     await asyncio.to_thread(_stream)
-    full_text = " ".join(spoken)
-    # --- Exécution du bloc d'action physique (stream) ---
-    m = re.search(r"<<<CODE>>>(.*?)<<<END_CODE>>>", full_text, re.DOTALL)
-    if m:
-        try:
-            import subprocess
-            from pidog_core import get_pidog
-            dog = get_pidog()
-            def retropie_start(): subprocess.run(["systemctl", "start", "retropie"], capture_output=True)
-            def retropie_stop(): subprocess.run(["systemctl", "stop", "retropie"], capture_output=True)
-            def retropie_game_cmd(game=""): pass
-            def retropie_list_cmd(): pass
-            def kodi_start(): subprocess.run(["systemctl", "start", "kodi"], capture_output=True)
-            def kodi_stop(): subprocess.run(["systemctl", "stop", "kodi"], capture_output=True)
-            def kodi_tv_on(): pass
-            def kodi_tv_off(): pass
-            def kodi_video_cmd(): pass
-            def kodi_pause(): pass
-            def reboot(): subprocess.run(["sudo", "reboot"], capture_output=True, timeout=5)
-            def stop_service():
-                import subprocess, time, gc, os
-                print("[CODE] stop_service appelé", flush=True)
-                for p in ("parec","aplay","mpv","piper","python3"):
-                    subprocess.run(["killall","-SIGTERM",p], capture_output=True)
-                # Healthcheck interne purgé le 01/11/2026 (pidog-health /
-                # moniteur-pidog supprimés) : plus rien à arrêter ici.
-                time.sleep(0.5)
-                try:
-                    from pidog_core import release_pidog
-                    release_pidog()
-                except Exception:
-                    pass
-                try:
-                    gc.collect()
-                except Exception:
-                    pass
-            def shutdown(): subprocess.run(["sudo", "shutdown", "-h", "now"], capture_output=True, timeout=5)
-            # Mémoire SQLite (base existante dans GoogleDrive)
-            def memory_add(key, value): memory.memory_add(str(key), str(value))
-            def memory_get(key=""):
-                rows = memory.memory_get(str(key) if key else None)
-                return [(k, v, u) for k, v, u in rows]
-            def memory_check_topic(topic=""):
-                return memory.memory_check_topic(str(topic))
-            def memory_all():
-                return memory.memory_get()
-            def memory_today():
-                return memory.memory_for_date(datetime.now().strftime("%Y-%m-%d"))
-            env = {
-                "__builtins__": None,
-                "dog": dog,
-                "get_pidog": get_pidog,
-                "pidog_core": __import__("pidog_core"),
-                "retropie_start": retropie_start,
-                "retropie_stop": retropie_stop,
-                "retropie_game_cmd": retropie_game_cmd,
-                "retropie_list_cmd": retropie_list_cmd,
-                "kodi_start": kodi_start,
-                "kodi_stop": kodi_stop,
-                "kodi_tv_on": kodi_tv_on,
-                "kodi_tv_off": kodi_tv_off,
-                "kodi_video_cmd": kodi_video_cmd,
-                "kodi_pause": kodi_pause,
-                "reboot": reboot,
-                "stop_service": stop_service,
-                "shutdown": shutdown,
-                "memory_add": memory_add,
-                "memory_get": memory_get,
-                "memory_check_topic": memory_check_topic,
-                "memory_all": memory_all,
-                "memory_today": memory_today,
-                "datetime": __import__("datetime"),
-            }
-            code = m.group(1).strip()
-            for line in code.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                exec(line, env)
-        except Exception as e:
-            print("[ACTION_STREAM] Erreur robot:", e, flush=True)
+
+    # --- Exécution du bloc d'action (texte et code bien séparés) -----------
+    code = "".join(code_chunks).strip()
+    if not code:
+        _, code = extract_action_code(raw_all)
+    if code:
+        def _action_debug(step, detail=""):
+            print(f"  [ACTION] {step}: {detail}", flush=True)
+
+        ok, detail = await asyncio.to_thread(
+            execute_action_block, code, _action_debug)
+        print(f"  [ACTION] {'OK' if ok else 'ÉCHEC'} — {detail}", flush=True)
     if spoken:
         history.append({"role": "agent",
                         "content": " ".join(spoken)[:300]})
@@ -1037,7 +1020,9 @@ async def handle_utterance(text: str, followup: bool = False):
     # LLM (streaming) + enchaînement de la discussion
     print("→ LLM", flush=True)
     led("magenta")
-    await llm_stream_reply(text)
+    # Le premier message après le mot de réveil « PiDog » est une commande :
+    # on le signale au LLM pour qu'il déduise et exécute l'action.
+    await llm_stream_reply(text, action_intent=not followup)
     closing = any(w in t for w in CONVERSATION_END_WORDS)
     if closing:
         print("  [DISCUSSION] clôturée → veille (« PiDog »)", flush=True)
@@ -1063,6 +1048,7 @@ class MicPipeline:
         # Grammaire contrainte sur vocabulaire présent : "pi dog" reconnu
         self.cmd_rec: Optional[KaldiRecognizer] = None
         self.chunks: list[str] = []
+        self.audio_chunks: list[bytes] = []   # pour Whisper (réécoute)
         self.listen_start = 0.0
         self.listen_timeout = LISTEN_TIMEOUT_SEC
         self.followup = False          # écoute enchaînée (sans wake word)
@@ -1161,6 +1147,7 @@ class MicPipeline:
         # Pas de SetEndpointing (non dispo dans cette version Vosk) — on gère
         # l'endpointing nous-mêmes par détection de silence RMS dans listen_step.
         self.chunks = []
+        self.audio_chunks = []
         self.listen_start = time.time()
         self.last_partial_log = 0.0
         self.followup = followup
@@ -1183,6 +1170,10 @@ class MicPipeline:
     # -- écoute : transcription streaming avec endpointing silence --
     def listen_step(self, data: bytes):
         now = time.time()
+        # Garde l'audio brut pour une éventuelle ré-transcription Whisper
+        # (max ~30 s : on ne veut pas remplir la RAM du Pi).
+        if len(self.audio_chunks) * CHUNK_BYTES < 30 * RATE * 2:
+            self.audio_chunks.append(data)
         # 1) RMS du chunk courant (détection de silence)
         rms = _rms(data)
         is_silent = rms < SILENCE_RMS_THRESHOLD
@@ -1216,19 +1207,17 @@ class MicPipeline:
             if (silence_duration >= SILENCE_MS / 1000.0
                     and self._has_speech
                     and partial_now):
-                text = partial_now.strip()
-                if text.strip().lower() == "ainsi":
-                    text = "assis"
-                elif text.strip().lower() == "attire":
-                    text = "assis"
-                if self.followup:
-                    text = re.sub(
-                        r"^\s*(?:ok(?:ay)?\s+)?(?:pi\s*dog(?:ue)?|pidog|pydog"
-                        r"|piwog)\b[\s,.:!-]*", "", text, flags=re.I).strip()
+                text = self._clean_transcript(partial_now, self.followup)
                 print(f"  [STT] {text}", flush=True)
                 was_followup = self.followup
+                audio = b"".join(self.audio_chunks)
                 self.exit_listen()
-                spawn(handle_utterance(text, followup=was_followup))
+                # Whisper (Groq) si configuré : meilleure précision sur la
+                # phrase de commande, avec repli automatique sur Vosk.
+                if stt.backend() == "groq" and audio:
+                    spawn(self.finish_listen(audio, text, was_followup))
+                else:
+                    spawn(handle_utterance(text, followup=was_followup))
                 return
         else:
             self._silence_start = None
@@ -1247,6 +1236,28 @@ class MicPipeline:
                 spawn(self.nothing_heard())
             else:
                 mood_led()
+
+    @staticmethod
+    def _clean_transcript(text: str, followup: bool) -> str:
+        """Corrige les erreurs Vosk connues et retire un éventuel « PiDog »."""
+        text = (text or "").strip()
+        if text.lower() in ("ainsi", "attire", "assis."):
+            text = "assis"
+        if followup:
+            text = re.sub(
+                r"^\s*(?:ok(?:ay)?\s+)?(?:pi\s*dog(?:ue)?|pidog|pydog"
+                r"|piwog)\b[\s,.:!-]*", "", text, flags=re.I).strip()
+        return text
+
+    async def finish_listen(self, pcm: bytes, fallback: str,
+                            followup: bool):
+        """Ré-transcription éventuelle (Whisper) puis routage."""
+        text = await asyncio.to_thread(stt.transcribe, pcm, RATE, fallback)
+        text = self._clean_transcript(text, followup)
+        if not text:
+            await self.nothing_heard()
+            return
+        await handle_utterance(text, followup=followup)
 
     def exit_listen(self):
         global last_activity

@@ -1,27 +1,24 @@
 [Unit]
 Description=PiDog Agent Stream (voix + robot)
-# Attend que le hardware (GPIO/I2C/robot_hat) soit prêt
+# Ne PAS mettre Requires=pidog.service : le daemon peut être lancé
+# manuellement/détaché par `pidog start` et n'est alors pas connu de systemd.
+# Le stream est un simple client ; il attend que le socket soit prêt.
 After=local-fs.target sysinit.target pidog.service
-Requires=pidog.service
 
 [Service]
 Type=simple
 User=mdelsinne
 Group=mdelsinne
 WorkingDirectory=/home/mdelsinne/pidog/extensions/pidog-agent
-# Solution B : nettoyage GPIO MCURST avant le démarrage du stream
-ExecStartPre=/bin/bash -c "python3 -c 'import RPi.GPIO as GPIO; GPIO.setmode(GPIO.BCM); GPIO.cleanup(29)' 2>/dev/null || true"
 ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/stream/agent_stream.py
 Restart=on-failure
 RestartSec=5s
-# Libère le groupe (GPIO) si le service crash brutalement
 KillMode=control-group
 Environment=LLM_LOCAL_DIR=/home/mdelsinne/models/llm-local
-Environment=PYTHONPATH=/home/mdelsinne/pidog/extensions/pidog-agent
+Environment=PYTHONPATH=/home/mdelsinne/pidog:/home/mdelsinne/pidog/extensions/pidog-agent
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 
 [Install]
-# Désactivé : démarrage manuel uniquement (pidog start / agent stream manuel)
 WantedBy=multi-user.target

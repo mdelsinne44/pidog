@@ -41,12 +41,19 @@ def net_ip():
 
 
 def dog_status():
+    """État réel du daemon partagé (ne crée aucun Pidog())."""
     try:
-        from pidog_core import get_pidog
-        d = get_pidog()
-        return "PiDog robot présent et connecté."
-    except Exception:
-        return "PiDog robot non détecté."
+        import pidog
+        state = pidog.service_state()
+        if state.get("ready"):
+            return "PiDog robot présent et connecté (daemon prêt)."
+        if state.get("state") == "starting":
+            return "PiDog daemon actif, robot en cours d'initialisation."
+        if state.get("state") == "error":
+            return f"PiDog robot indisponible ({state.get('error')})."
+        return "PiDog robot non détecté (service arrêté)."
+    except Exception as exc:
+        return f"PiDog service non interrogeable ({exc})."
 
 
 def env_summary():

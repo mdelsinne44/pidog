@@ -1,161 +1,196 @@
 #!/usr/bin/env python3
-import os, sys
-# Forcer PYTHONPATH au dépôt avant tout import
-os.environ['PYTHONPATH'] = '/home/mdelsinne/pidog' + os.pathsep + os.environ.get('PYTHONPATH', '')
-# Nettoyer le .egg du sys.path pour le package pidog
-sys.path = [p for p in sys.path if 'pidog-1.3.9' not in p]
-# Insérer le dépôt en tête
-sys.path.insert(0, '/home/mdelsinne/pidog')
 """Point d'entrée unique pour piloter PiDog.
 
 Usage :
-    pidog start                      Lance le daemon partagé (robot GPIO + socket)
-    pidog stop                       Arrête tout (robot couché, GPIO libéré)
-    pidog stop --stream              N'arrête que le stream vocal, laisse le robot
-    pidog status                     Affiche l'état (service / robot / voix seule)
-    pidog agent cli                  Lance le CLI texte (pas de robot par défaut)
-    pidog agent stream               Lance le stream vocal (auto-start du robot si besoin)
-    pidog agent stream --voice-only  Mode vocal pur, jamais de robot
+    pidog start [--stream]           Lance le daemon partagé (robot GPIO + socket)
+    pidog stop [--stream]            Arrête le service (ou seulement le stream)
+    pidog status                     Affiche l'état (daemon / robot / stream)
+    pidog agent cli [--debug]        CLI texte (utilise le daemon si prêt)
+    pidog agent stream               Stream vocal (démarre le robot si besoin)
+    pidog agent stream --voice-only  Mode vocal pur, sans robot
     pidog my_dog                     Affiche le proxy chien (débug)
-    pidog my_dog().lie              Exécuter une action via le proxy
 
-Toutes les commandes `pidog.my_dog()....` pointent vers le même singleton robot,
-initialisé par `pidog start`. Si le service n'est pas lancé, les commandes
-robotiques signalent « PiDog absent / GPIO occupé ».
+Un seul Pidog() existe : celui du daemon lancé par `pidog start`.
+Les commandes `pidog.my_dog()....` sont des RPC vers ce daemon.
 """
-import sys
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-# On s'assure que le chemin racine est dispo
-PIDOG_ROOT = Path(__file__).parent.parent.resolve()
+PIDOG_ROOT = Path(__file__).resolve().parent.parent
 # Forcer le dépôt local (supprimer le package installé .egg du chemin Python)
 sys.path.insert(0, str(PIDOG_ROOT))
+os.environ["PYTHONPATH"] = str(PIDOG_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")
 
-from pidog import start, stop, status, my_dog, get_pidog, release_pidog
+from pidog import start, stop, status, my_dog, get_pidog
+
+AGENT_DIR = PIDOG_ROOT / "extensions" / "pidog-agent"
+STREAM_SCRIPT = AGENT_DIR / "stream" / "agent_stream.py"
+CLI_SCRIPT = AGENT_DIR / "cli" / "agent_cli.py"
+STREAM_SERVICE = "pidog-agent-stream.service"
+
+
+def _systemctl(action, unit):
+    try:
+        res = subprocess.run(
+            ["systemctl", action, unit], capture_output=True, text=True, timeout=10
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _stop_stream():
+    """Arrête le stream systemd ET l'éventuel lancement direct (fallback)."""
+    ok = _systemctl("stop", STREAM_SERVICE)
+    try:
+        subprocess.run(["pkill", "-TERM", "-f", "agent_stream.py"], capture_output=True)
+    except Exception:
+        pass
+    return ok
 
 
 def cmd_start(args):
     """pidog start [--stream]"""
-    import argparse
-    parser = argparse.ArgumentParser(description="Lancer le service PiDog.", add_help=False)
-    grp = parser.add_argument_group()
-    grp.add_argument("--stream", action="store_true", help="Démarrer aussi le stream vocal")
-    try:
-        parsed, _ = parser.parse_known_args(args)
-    except SystemExit:
-        return 2
+    want_stream = "--stream" in args
     print("[pidog start] Initialisation du service partagé (robot GPIO + socket Unix).", flush=True)
-    start(auto_start_robot=True)
-    # Si --stream, on essaie de lancer le stream (via systemd si dispo, sinon detached)
-    if parsed.stream:
-        print("[pidog start] Lancement du stream vocal (agent)...", flush=True)
-        # Essai via systemd d'abord (l'unité existe déjà)
-        try:
-            subprocess.run(["systemctl", "start", "pidog-agent"], capture_output=True, timeout=10)
-            print("[pidog start] systemctl pidog-agent lancés.", flush=True)
-        except Exception:
-            # Sinon on lance detached (simple python launch)
-            print("[pidog start] Démarrage detached du stream vocal.", flush=True)
-    print("[pidog start] Service prêt. Essayez `pidog status` ou `pidog my_dog().lie`.", flush=True)
+    if not start(auto_start_robot=True):
+        return 1
+
+    if want_stream:
+        print("[pidog start] Lancement du stream vocal...", flush=True)
+        if not _systemctl("start", STREAM_SERVICE):
+            print(
+                f"[pidog start] systemctl {STREAM_SERVICE} indisponible — "
+                "démarrage direct du stream.",
+                flush=True,
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                str(PIDOG_ROOT) + os.pathsep + str(AGENT_DIR) + os.pathsep
+                + env.get("PYTHONPATH", "")
+            )
+            subprocess.Popen(
+                [sys.executable, str(STREAM_SCRIPT)],
+                cwd=str(AGENT_DIR),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+    print("[pidog start] Service prêt. Essayez `pidog status` ou `pidog agent cli --debug`.", flush=True)
+    return 0
 
 
 def cmd_stop(args):
     """pidog stop [--stream]"""
-    import argparse
-    parser = argparse.ArgumentParser(description="Arrêter PiDog.", add_help=False)
-    grp = parser.add_argument_group()
-    grp.add_argument("--stream", action="store_true", help="N'arrêter que le stream vocal")
-    try:
-        parsed, _ = parser.parse_known_args(args)
-    except SystemExit:
-        return 2
-    if parsed.stream:
+    if "--stream" in args:
         print("[pidog stop --stream] Arrêt du stream vocal uniquement.", flush=True)
-        try:
-            subprocess.run(["systemctl", "stop", "pidog-agent"], capture_output=True, timeout=10)
+        if _stop_stream():
             print("[pidog stop --stream] Stream vocal arrêté.", flush=True)
-        except Exception:
-            print("[pidog stop --stream] Impossible d'arrêter pidog-agent (systemctl).", flush=True)
-    else:
-        print("[pidog stop] Arrêt complet (robot couché + GPIO libéré).", flush=True)
-        stop()
-        print("[pidog stop] Service arrêté proprement.", flush=True)
+        else:
+            print("[pidog stop --stream] Stream vocal arrêté (fallback).", flush=True)
+        return 0
+
+    print("[pidog stop] Arrêt complet (stream + robot couché + GPIO libéré).", flush=True)
+    _stop_stream()
+    stop()
+    print("[pidog stop] Service arrêté proprement.", flush=True)
+    return 0
 
 
-def cmd_status(args):
-    """pidog status"""
-    s = status()
-    print(f"pidog : {s}", flush=True)
+def cmd_status(_args):
+    print(f"pidog : {status()}", flush=True)
+    return 0
 
 
 def cmd_agent(args):
-    """pidog agent cli | stream | --voice-only"""
-    if len(args) == 0:
-        print("Usage: pidog agent cli | stream | stream --voice-only")
+    """pidog agent cli [--debug] | stream [--voice-only]"""
+    if not args:
+        print("Usage: pidog agent cli [--debug] | stream [--voice-only]")
         return 2
-    cmd = args[0]
-    if cmd == "cli":
-        print("[pidog agent cli] Lancement du CLI texte (mode discussion, pas de robot).", flush=True)
-        os.execvp("python3", ["python3", "/home/mdelsinne/pidog/extensions/pidog-agent/cli/agent_cli.py"])
-    elif cmd == "stream":
-        print("[pidog agent stream] Lancement du stream vocal.", flush=True)
-        # Vérifier si le service robot tourne ; si non, on le démarre
-        start(auto_start_robot=True)
-        try:
-            subprocess.run(["systemctl", "start", "pidog-agent"], capture_output=True, timeout=10)
-            print("[pidog agent stream] pidog-agent.service démarré via systemctl.", flush=True)
-        except Exception:
-            print("[pidog agent stream] Lancement detached de pidog_stream.py.", flush=True)
-            subprocess.Popen([
-                "python3", "/home/mdelsinne/pidog/extensions/pidog-agent/voice/pidog_stream.py"
-            ], cwd="/home/mdelsinne/pidog/extensions/pidog-agent")
-    elif cmd in ("voice-only", "--voice-only"):
-        print("[pidog agent stream --voice-only] Mode vocal pur (pas de robot).", flush=True)
-        try:
-            subprocess.run(["systemctl", "start", "pidog-agent"], capture_output=True, timeout=10)
-        except Exception:
-            subprocess.Popen([
-                "python3", "/home/mdelsinne/pidog/extensions/pidog-agent/voice/pidog_stream.py"
-            ], cwd="/home/mdelsinne/pidog/extensions/pidog-agent")
-    else:
-        print(f"Sous-commande inconnue : {cmd}")
-        return 2
+    sub = args[0]
+    rest = args[1:]
+
+    if sub == "cli":
+        print("[pidog agent cli] Lancement du CLI texte (utilise le daemon s'il est prêt).", flush=True)
+        # execvp transmet --debug et les éventuelles options au CLI.
+        os.execvp(sys.executable, [sys.executable, str(CLI_SCRIPT), *rest])
+
+    if sub == "stream":
+        voice_only = any(a in ("--voice-only", "voice-only") for a in rest)
+        if voice_only:
+            print("[pidog agent stream] Mode vocal pur (sans robot).", flush=True)
+        else:
+            print("[pidog agent stream] Vérification du service robot...", flush=True)
+            if not start(auto_start_robot=True):
+                print(
+                    "[pidog agent stream] Robot indisponible — le stream démarre "
+                    "quand même en mode dégradé.",
+                    flush=True,
+                )
+        if not _systemctl("start", STREAM_SERVICE):
+            print(
+                f"[pidog agent stream] systemctl {STREAM_SERVICE} indisponible — "
+                "démarrage direct.",
+                flush=True,
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                str(PIDOG_ROOT) + os.pathsep + str(AGENT_DIR) + os.pathsep
+                + env.get("PYTHONPATH", "")
+            )
+            subprocess.Popen(
+                [sys.executable, str(STREAM_SCRIPT)],
+                cwd=str(AGENT_DIR),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            print(f"[pidog agent stream] {STREAM_SERVICE} démarré.", flush=True)
+        return 0
+
+    print(f"Sous-commande inconnue : {sub}")
+    return 2
+
+
+def cmd_my_dog(_args):
+    dog = my_dog()
+    print(f"pidog.my_dog() -> {dog}", flush=True)
+    try:
+        v = get_pidog().get_battery_voltage()
+        print(f"Batterie : {v} V", flush=True)
+    except Exception as exc:
+        print(f"Erreur lecture : {exc}", flush=True)
+        return 1
+    return 0
 
 
 def main():
     args = sys.argv[1:]
     if not args:
         print("Usage: pidog <commande> [options]")
-        print("Commandes : start, stop, status, agent cli/stream/voice-only, my_dog")
+        print("Commandes : start, stop, status, agent cli/stream, my_dog")
         print("Exemple : pidog start --stream")
-        sys.exit(1)
+        return 1
 
-    cmd = args[0]
-    remaining = args[1:]
-
+    cmd, remaining = args[0], args[1:]
     if cmd == "start":
-        cmd_start(remaining)
-    elif cmd == "stop":
-        cmd_stop(remaining)
-    elif cmd == "status":
-        cmd_status(remaining)
-    elif cmd == "agent":
-        cmd_agent(remaining)
-    elif cmd == "my_dog":
-        d = my_dog()
-        print(f"pidog.my_dog() -> {d}", flush=True)
-        try:
-            v = get_pidog().get_battery_voltage()
-            print(f"Batterie : {v} V", flush=True)
-        except Exception as e:
-            print(f"Erreur lecture : {e}", flush=True)
-    else:
-        print(f"Commande inconnue : {cmd}")
-        print("Usage: pidog <commande> [options]")
-        sys.exit(1)
+        return cmd_start(remaining)
+    if cmd == "stop":
+        return cmd_stop(remaining)
+    if cmd == "status":
+        return cmd_status(remaining)
+    if cmd == "agent":
+        return cmd_agent(remaining)
+    if cmd == "my_dog":
+        return cmd_my_dog(remaining)
+
+    print(f"Commande inconnue : {cmd}")
+    print("Usage: pidog <commande> [options]")
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

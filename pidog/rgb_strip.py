@@ -15,7 +15,9 @@ class RGBStrip():
         'blue':    [0,   0, 255],
         'cyan':    [0, 255, 255],
         'magenta': [255,   0, 255],
-        'pink':    [255, 100, 100]
+        'pink':    [255, 100, 100],
+        'orange':  [255, 140,   0],
+        'purple':  [128,   0, 255]
     }
 
     # styles define

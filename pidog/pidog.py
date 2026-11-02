@@ -955,6 +955,9 @@ class Pidog():
             if part == 'legs':
                 for _ in range(step_count):
                     self.legs_move(actions, immediately=False, speed=speed)
+                # correction : quand assis, la tête doit regarder vers l'avant/pas le plafond
+                if action_name == 'sit':
+                    self.head_move([[0, 0, -35]], pitch_comp=pitch_comp, immediately=False, speed=speed)
             elif part == 'head':
                 for _ in range(step_count):
                     self.head_move(actions, pitch_comp=pitch_comp, immediately=False, speed=speed)

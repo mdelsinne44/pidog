@@ -7,14 +7,17 @@ Type=simple
 User=mdelsinne
 Group=mdelsinne
 WorkingDirectory=/home/mdelsinne/pidog/extensions/pidog-agent
-# Solution A : attendre le hardware + nettoyage GPIO (Solution B) avant init daemon
-ExecStartPre=/bin/bash -c "python3 -c 'import RPi.GPIO as GPIO; GPIO.setmode(GPIO.BCM); GPIO.cleanup(29)' 2>/dev/null || true"
-ExecStartPre=/bin/rm -f /tmp/pidog.sock
+# Aucun nettoyage de /tmp ici : le daemon lui-même supprime les fichiers
+# obsolètes APRÈS avoir pris le verrou. Sinon systemd pourrait effacer le
+# socket d'un daemon lancé manuellement par `pidog start` (double Pidog).
 ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/pidog_service_daemon.py
 Restart=on-failure
 RestartSec=5s
+# control-group tue aussi le process multiprocessing (ultrason) du robot.
 KillMode=control-group
+TimeoutStopSec=20
 Environment=PYTHONPATH=/home/mdelsinne/pidog
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 # Désactivé : lancement manuel via 'pidog start' (pas d'auto-boot)

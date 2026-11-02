@@ -1,9 +1,17 @@
 # PiDog Assistant
 - Pi 4 2Go, Robot HAT, mic 360° (ALSA), BT/HDMI/Jack sortie (volume control)
-- Stt: Groq Whisper free (20rpm/2000/j) / local whisper base int8
-- LLM: Gemini Flash free (FR, tools)
+- Un seul propriétaire du robot : le daemon `pidog start` (socket `/tmp/pidog.sock`)
+- CLI : `pidog agent cli` ; trace détaillée : `pidog agent cli --debug`
+- Stream vocal : `pidog agent stream` (ou `--voice-only` sans robot)
+- État : `pidog status` ; arrêt : `pidog stop` (ou `pidog stop --stream`)
+- Stt: Vosk local pour la veille ; commande via Groq Whisper si `STT_BACKEND=groq|auto`
+  (repli automatique Vosk), ou 100 % Vosk avec `STT_BACKEND=vosk`
+- LLM: Groq (FR, actions) — `LLM_MODEL` dans `.env`
 - TTS: Piper local fr_FR
-- Actions: RetroPie/EmuStation, radio (Kodi), meteo, chien sit/debout/LED
+- Actions: RetroPie/EmuStation, radio (Kodi), meteo, chien (postures, tête,
+  queue, LED, pattes, marche, presets SunFounder) via `dog.action(...)`
+- Sécurité: palier `sit` obligatoire entre couché et debout, vitesse douce,
+  refus des mouvements lourds si la tension batterie est trop basse
 - Émotions: Groq écrit `[JOIE]`, `[TRISTE]`, `[COLERE]`, `[SURPRISE]`,
   `[CURIEUX]`, `[EXCITE]`, `[FATIGUE]`, `[CALME]`, `[NEUTRE]` dans sa
   réponse ; `pidog_stream.py` retire ces balises du texte parlé et les

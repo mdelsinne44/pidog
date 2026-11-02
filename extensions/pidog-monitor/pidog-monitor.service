@@ -13,7 +13,7 @@ ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh
 # Vérification du nouveau service pidog (le robot)
 ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog.service || echo "[MONITOR] SERVICE PIDOG INACTIF" | logger -t pidog-monitor'
 # Vérification de l'agent (stream vocal)
-ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog-agent.service && echo "[MONITOR] AGENT ACTIF" || echo "[MONITOR] AGENT INACTIF" | logger -t pidog-monitor'
+ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog-agent-stream.service && echo "[MONITOR] AGENT ACTIF" || echo "[MONITOR] AGENT INACTIF" | logger -t pidog-monitor'
 # Si le script échoue → système considère comme failed → relance
 Restart=on-failure
 RestartSec=30
