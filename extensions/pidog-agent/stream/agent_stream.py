@@ -67,8 +67,8 @@ def _reset_pidog_on_exit():
     try:
         from pidog_core import get_pidog
         dog = get_pidog()
-        dog.do_action("lie")
-        dog.head_move([[0, 0, 0]], immediately=True, speed=3)
+        dog.do_action("sit")
+        dog.head_move([[0, 0, 0]], immediately=True, speed=1)
         try:
             dog.stable()
         except Exception:
@@ -1323,9 +1323,9 @@ def dog_startup_pose():
         return
     try:
         # 1. Tête droite d'abord (servo à 0, immédiat, lent : évite le penché)
-        dog.head_move([[0, 0, 0]], immediately=True, speed=3)
+        dog.head_move([[0, 0, 0]], immediately=True, speed=1)
         # 2. Puis la posture couchée (lie inclut jambes + queue)
-        dog.do_action("lie")
+        dog.do_action("sit")
         # Stabilisation anti-vibration après posture init
         dog.stable()
         print("Posture init : couché, tête à zéro (servo 0).", flush=True)

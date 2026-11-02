@@ -166,8 +166,8 @@ def stop_service():
     try:
         dog = get_pidog()
         if dog is not None:
-            dog.do_action("lie")
-            dog.head_move([[0, 0, 0]], immediately=True, speed=3)
+            dog.do_action("sit")
+            dog.head_move([[0, 0, 0]], immediately=True, speed=1)
             dog.stable()
             dog.rgb_strip.set_mode(style="listen", color="black", brightness=0)
             if hasattr(dog.rgb_strip, 'close'):
