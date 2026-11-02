@@ -9,6 +9,7 @@ Group=mdelsinne
 WorkingDirectory=/home/mdelsinne/pidog/extensions/pidog-agent
 # Solution A : attendre le hardware + nettoyage GPIO (Solution B) avant init daemon
 ExecStartPre=/bin/bash -c "python3 -c 'import RPi.GPIO as GPIO; GPIO.setmode(GPIO.BCM); GPIO.cleanup(29)' 2>/dev/null || true"
+ExecStartPre=/bin/rm -f /tmp/pidog.sock
 ExecStart=/usr/bin/python3 /home/mdelsinne/pidog/extensions/pidog-agent/pidog_service_daemon.py
 Restart=on-failure
 RestartSec=5s
