@@ -132,7 +132,7 @@ class DogProxyServer:
                     self.dog = Pidog()
                 except Exception as e2:
                     log.error("Daemon Pidog init fail (GPIO busy?) : %s", e2)
-                    self.dog = None
+                    # self.dog kept (robot works despite GPIO busy)
                 log.info("Dog proxy : Pidog initialisé (robot_hat GPIO).")
             except OSError as e:
                 log.error(f"Dog proxy : impossible d'init Pidog : {e}")
