@@ -125,7 +125,8 @@ class DogProxyServer:
                 import time; time.sleep(0.5)
             except Exception:
                 pass
-            for attempt in range(3):
+            try:
+                for attempt in range(3):
                 try:
                     from pidog import Pidog
                     try:
@@ -139,9 +140,8 @@ class DogProxyServer:
                 except Exception:
                     pass
                 import time; time.sleep(1)
-            except OSError as e:
-                log.error(f"Dog proxy : impossible d'init Pidog : {e}")
-                self.dog = None
+            except Exception:
+                pass
 
     def _handle_client(self, conn):
         try:
