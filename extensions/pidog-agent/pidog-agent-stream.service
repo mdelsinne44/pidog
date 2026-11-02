@@ -1,7 +1,8 @@
 [Unit]
 Description=PiDog Agent Stream (voix + robot)
 # Attend que le hardware (GPIO/I2C/robot_hat) soit prêt
-After=local-fs.target sysinit.target
+After=local-fs.target sysinit.target pidog.service
+Requires=pidog.service
 
 [Service]
 Type=simple
@@ -23,4 +24,4 @@ Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 
 [Install]
 # Désactivé : démarrage manuel uniquement (pidog start / agent stream manuel)
-# WantedBy=multi-user.target
+WantedBy=multi-user.target

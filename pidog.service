@@ -17,4 +17,4 @@ Environment=PYTHONPATH=/home/mdelsinne/pidog
 
 [Install]
 # Désactivé : lancement manuel via 'pidog start' (pas d'auto-boot)
-# WantedBy=multi-user.target
+WantedBy=multi-user.target
