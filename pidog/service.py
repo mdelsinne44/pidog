@@ -127,19 +127,19 @@ class DogProxyServer:
                 pass
             try:
                 for attempt in range(3):
-                try:
-                    from pidog import Pidog
                     try:
-                        from pidog.pidog import Pidog
-                        self.dog = Pidog()
-                    except Exception as e2:
-                        log.error("Daemon Pidog init fail (GPIO busy?) attempt %d: %s", attempt+1, e2)
-                    else:
-                        log.info("Dog proxy : Pidog initialisé (robot_hat GPIO).")
-                        break
-                except Exception:
-                    pass
-                import time; time.sleep(1)
+                        from pidog import Pidog
+                        try:
+                            from pidog.pidog import Pidog
+                            self.dog = Pidog()
+                        except Exception as e2:
+                            log.error("Daemon Pidog init fail (GPIO busy?) attempt %d: %s", attempt+1, e2)
+                        else:
+                            log.info("Dog proxy : Pidog initialisé (robot_hat GPIO).")
+                            break
+                    except Exception:
+                        pass
+                    import time; time.sleep(1)
             except Exception:
                 pass
 
