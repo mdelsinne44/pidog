@@ -16,3 +16,6 @@ extensions/pidog-agent/cli/*.log
 
 # Modèles TTS/STT volumineux (Piper onnx + Vosk) — déplacés ici le 01/11/2026, jamais committés
 extensions/pidog-agent/models/
+
+# Base mémoire locale (runtime, contient des données perso) — jamais committée
+data/

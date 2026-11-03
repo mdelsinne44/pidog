@@ -18,7 +18,7 @@ Design :
     recognizers (wake + commande) : léger et réactif sur Pi4.
   * Robustesse Bluetooth : parec relancé automatiquement si le flux meurt.
 
-Usage :  python3 pidog_stream.py
+Usage :  python3 agent_stream.py            (ou `systemctl start pidog-agent-stream`)
 """
 import sys
 sys.path.append("/home/mdelsinne")  # robot_guardian.py (hors repo)
@@ -27,8 +27,16 @@ _REPO_ROOT = "/home/mdelsinne/pidog"
 for _path in (_REPO_ROOT, _AGENT_DIR):
     if _path not in sys.path:
         sys.path.insert(0, _path)
-from robot_guardian import RobotGuardian
-guardian = RobotGuardian()
+
+# Garde-fou optionnel : si le module a disparu, le service doit quand même
+# démarrer (avant, l'ImportError tuait le process avant le moindre log).
+try:
+    from robot_guardian import RobotGuardian
+    guardian = RobotGuardian()
+except Exception as _guardian_error:
+    guardian = None
+    print(f"[stream] robot_guardian indisponible ({_guardian_error}) — "
+          "démarrage sans garde-fou.", flush=True)
 
 import asyncio
 import json
@@ -40,7 +48,6 @@ from collections import deque
 from typing import Optional
 
 import env_vision
-from memory_load import load_memory
 import memory
 import stt
 from action_runner import execute_action_block, extract_action_code
@@ -102,9 +109,20 @@ def fix_gpio_busy():
     """
     for proc in ("parec", "aplay", "mpv", "piper"):
         subprocess.run(["killall", "-SIGTERM", proc], capture_output=True)
+    # WAV de synthèse orphelins d'un run précédent (fuite /tmp).
+    try:
+        import glob
+        for path in glob.glob("/tmp/pidog_tts_*.wav"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
     try:
         my_pid = os.getpid()
-        result = subprocess.run(["pgrep", "-f", "pidog_stream.py"],
+        # Nom réel du script (l'ancien « pidog_stream.py » n'existe plus).
+        result = subprocess.run(["pgrep", "-f", "agent_stream.py"],
                               capture_output=True, text=True)
         for line in result.stdout.strip().split("\n"):
             if line.strip() and int(line.strip()) != my_pid:
@@ -121,7 +139,11 @@ fix_gpio_busy()
 
 # ------------------------------------------------------------------ config --
 GROQ_KEY = os.getenv("GROQ_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
+# Voix = latence avant tout : qwen3.8-27b répond en ~0,4 s sur Groq.
+# Le CLI, lui, utilise LLM_MODEL_CLI (gpt-oss-120b) pour la profondeur.
+LLM_MODEL = (os.getenv("LLM_MODEL_VOICE") or os.getenv("LLM_MODEL")
+             or "qwen/qwen3.8-27b")
+CITY = os.getenv("PIDOG_CITY", "Nantes")
 
 PIPER_BIN = os.getenv("PIPER_BIN", "/home/mdelsinne/.local/bin/piper")
 VOICE = os.getenv("VOICE", os.path.join(BASE, "fr_FR-glados-medium.onnx"))
@@ -156,10 +178,15 @@ SILENCE_BYTES = int(SILENCE_MS / 1000 * RATE * 2)  # 960 bytes en s16le mono
 SILENCE_RMS_THRESHOLD = 400  # seuil RMS en dessous duquel on considère le son comme du silence
 
 # Mots qui closent la discussion : on répond puis on rend la parole à la veille.
-CONVERSATION_END_WORDS = (
-    "au revoir", "aurevoir", "à plus", "a plus", "bonne nuit", "bonne journée",
-    "bye", "ciao", "salut à toi", "c'est tout", "terminé", "termine",
-)
+# Regex avec frontières de mots : « termine » tout seul est trop fréquent
+# (« je termine mon café » fermait la conversation).
+_CLOSING_RE = re.compile(
+    r"\b(au revoir|aurevoir|à plus|a plus|bonne nuit|bonne journée|bye|ciao|"
+    r"c'est tout|c est tout|on arrête|on arrete|terminé)\b", re.I)
+
+
+def _is_closing(text: str) -> bool:
+    return bool(_CLOSING_RE.search(text or ""))
 
 try:
     from pidog_prompt import voice_prompt
@@ -256,7 +283,8 @@ def dog_head(yaw: float = 0, pitch: float = 0):
     if dog is None:
         return
     try:
-        dog.head_move([[yaw, pitch, 0]], immediately=True, speed=60)
+        # Vitesse basse : la tête vibre au-delà (~overshoot servo connu).
+        dog.head_move([[yaw, pitch, 0]], immediately=True, speed=30)
     except Exception:
         pass
 
@@ -692,7 +720,7 @@ async def weather_reply(text: str) -> str:
     m = re.search(
         r"(?:météo|meteo|temps|weather).{0,25}?(?:\bà\b|\ba\b|d')\s+"
         r"([A-Za-zÀ-ÿ'\- ]{2,30})", text, re.I)
-    city = (m.group(1).strip().rstrip(".!?") if m else "Nantes")
+    city = (m.group(1).strip().rstrip(".!?") if m else CITY)
 
     def fetch():
         geo = requests.get(
@@ -725,27 +753,20 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
         return
     loop = asyncio.get_running_loop()
     import datetime
-    today = datetime.date.today().isoformat()
-    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-    # Charge la mémoire récente pour l'injecter au LLM
-    mem_lines = memory.memory_get()
-    mem_text = "\n".join([f"- {k} = {v}" for k, v, _ in mem_lines[:15]])
-    memory_hint = (
-        f"\n[JOUR ACTUEL : {today}, DEMAIN : {tomorrow}]\n"
-        f"[MÉMOIRE GD018/GoogleDrive] : {mem_text}\n"
-        "Si l'utilisateur te donne un renseignement (ex : demain rdv coiffeur), utilise memory_add('coiffeur', 'Demain j\'ai rdv coiffeur') puis répète-le dans ta réponse. "
-        "Pour relire un sujet mémorisé (coiffeur, rdv, rendez-vous), appelle memory_get('coiffeur')."
-    )
+    now = datetime.datetime.now()
+    today = now.date().isoformat()
+    tomorrow = (now.date() + datetime.timedelta(days=1)).isoformat()
+    # Retrieval ciblé (FTS5 + récence) au lieu de dumper les 40 dernières
+    # lignes : moins de tokens par tour, et le bon souvenir au bon moment.
+    mem_text = memory.memory_context(user_text, k=5, max_chars=700)
     history.append({"role": "user", "content": user_text})
     env_summary = env_vision.env_summary()
-    env_text = "; ".join(f"{k}:{v}" for k,v in env_summary.items())
-    mem = load_memory()
-    mem_text = "; ".join(f"{k}={v}" for k,v in mem.items()) if mem else ""
+    env_text = "; ".join(f"{k}:{v}" for k, v in env_summary.items())
     mood_hint = (
-        f"\nContexte interne : ta dernière humeur affichée était "
-        f"{CURRENT_EMOTION}. Choisis la balise adaptée au nouveau message.\n"
-        f"[Environnement actuel] {env_text}\n"
-        f"[Mémoire] {mem_text}"
+        f"\n[CONTEXTE] {now.strftime('%Y-%m-%d %H:%M')} — aujourd'hui {today}, "
+        f"demain {tomorrow}. Dernière humeur : {CURRENT_EMOTION}.\n"
+        f"[MÉMOIRE PERTINENTE]\n{mem_text}\n"
+        f"[ENVIRONNEMENT] {env_text}\n"
     )
     if action_intent:
         mood_hint += (
@@ -840,12 +861,40 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
                 consume_text()
 
         try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                json={"model": LLM_MODEL, "messages": messages,
-                      "max_tokens": 180, "temperature": 0.3, "stream": True},
-                stream=True, timeout=30)
+            r = None
+            quota_hit = False
+            for attempt in range(2):
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                    json={"model": LLM_MODEL, "messages": messages,
+                          "max_tokens": 180, "temperature": 0.3, "stream": True},
+                    stream=True, timeout=30)
+                if r.status_code != 429:
+                    break
+                # Quota TPM : une seule reprise si l'attente est courte.
+                # Sinon on le dit clairement (avant : « Je n'ai pas compris »,
+                # ce qui masquait la vraie cause).
+                try:
+                    msg = r.json().get("error", {}).get("message", "")
+                except Exception:
+                    msg = ""
+                match = re.search(r"try again in ([\d.]+)\s*(ms|s)", msg)
+                wait = 3.0
+                if match:
+                    wait = float(match.group(1))
+                    wait = wait / 1000 if match.group(2) == "ms" else wait
+                print(f"LLM 429 (quota) — attente {wait:.1f}s", flush=True)
+                if attempt == 0 and wait <= 6:
+                    time.sleep(wait)
+                    continue
+                quota_hit = True
+                break
+            if quota_hit:
+                loop.call_soon_threadsafe(
+                    tts_queue.put_nowait,
+                    "Je sature mon quota de parole, réessaie dans une minute.")
+                return
             if r.status_code != 200:
                 print(f"LLM HTTP {r.status_code}: {r.text[:150]}", flush=True)
                 loop.call_soon_threadsafe(tts_queue.put_nowait,
@@ -933,9 +982,9 @@ async def handle_utterance(text: str, followup: bool = False):
     print(f"[ENTENDU] {text!r}" + ("  (discussion)" if followup else ""),
           flush=True)
 
-    # STOP / silence
-    if any(w in t for w in ("arrête", "arrete", "stop", "coupe",
-                            "pause", "silence")):
+    # STOP / silence : mots isolés. L'ancien test par sous-chaîne réagissait à
+    # « arrête » n'importe où dans la phrase (et coupait la radio sans raison).
+    if re.search(r"\b(arrête|arrete|stop|coupe|silence)\b", t):
         print("→ STOP", flush=True)
         try:
             subprocess.run(["pkill", "-f", "mpv"], capture_output=True)
@@ -945,29 +994,32 @@ async def handle_utterance(text: str, followup: bool = False):
         await say("Musique arrêtée.")
         return
 
-    # VOLUME
-    if any(w in t for w in ("baisse", "moins", "un peu", "bas", "réduis")):
-        print("→ VOLUME BAS", flush=True)
-        try:
-            subprocess.run(["pactl", "set-sink-volume", JBL_SINK, "30%"],
-                           capture_output=True, timeout=5)
-        except Exception as e:
-            print("Vol-:", e, flush=True)
-        led("green")
-        await say("Volume baissé.")
-        return
-    if any(w in t for w in ("augmente", "monte", "fort", "haut")):
-        print("→ VOLUME HAUT", flush=True)
-        try:
-            subprocess.run(["pactl", "set-sink-volume", JBL_SINK, "80%"],
-                           capture_output=True, timeout=5)
-            subprocess.run(["pactl", "set-sink-mute", JBL_SINK, "0"],
-                           capture_output=True, timeout=5)
-        except Exception as e:
-            print("Vol+:", e, flush=True)
-        led("green")
-        await say("Volume monté.")
-        return
+    # VOLUME : il faut un mot de volume ET une direction. Avant, « un peu »
+    # ou « en haut » suffisaient : chaque phrase banale baissait le son et
+    # sortait de la conversation.
+    if re.search(r"\b(volume|son|audio)\b", t):
+        if re.search(r"\b(bas|baisse|baisser|moins|rédui|redui|diminu|descend)\b", t):
+            print("→ VOLUME BAS", flush=True)
+            try:
+                subprocess.run(["pactl", "set-sink-volume", JBL_SINK, "30%"],
+                               capture_output=True, timeout=5)
+            except Exception as e:
+                print("Vol-:", e, flush=True)
+            led("green")
+            await say("Volume baissé.")
+            return
+        if re.search(r"\b(haut|augmente|monte|fort|max)\b", t):
+            print("→ VOLUME HAUT", flush=True)
+            try:
+                subprocess.run(["pactl", "set-sink-volume", JBL_SINK, "80%"],
+                               capture_output=True, timeout=5)
+                subprocess.run(["pactl", "set-sink-mute", JBL_SINK, "0"],
+                               capture_output=True, timeout=5)
+            except Exception as e:
+                print("Vol+:", e, flush=True)
+            led("green")
+            await say("Volume monté.")
+            return
 
     # RADIO (FIP / NOVA) — lancée pendant qu'on parle, pour la fluidité
     station = None
@@ -1010,8 +1062,8 @@ async def handle_utterance(text: str, followup: bool = False):
             await say("Redémarrage demandé, mais autorisation refusée.")
         return
 
-    # MÉTÉO
-    if any(w in t for w in ("météo", "meteo", "temps", "weather")):
+    # MÉTÉO : « temps » seul déclenchait la météo sur « en même temps ».
+    if re.search(r"\b(météo|meteo|weather)\b|\bquel temps\b", t):
         print("→ MÉTÉO", flush=True)
         led("magenta")
         await say(await weather_reply(text))
@@ -1023,7 +1075,7 @@ async def handle_utterance(text: str, followup: bool = False):
     # Le premier message après le mot de réveil « PiDog » est une commande :
     # on le signale au LLM pour qu'il déduise et exécute l'action.
     await llm_stream_reply(text, action_intent=not followup)
-    closing = any(w in t for w in CONVERSATION_END_WORDS)
+    closing = _is_closing(t)
     if closing:
         print("  [DISCUSSION] clôturée → veille (« PiDog »)", flush=True)
         return

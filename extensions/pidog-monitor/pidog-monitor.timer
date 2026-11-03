@@ -1,9 +1,11 @@
 [Unit]
-Description=Timer périodique pour pidog-monitor.service (vérification santé)
+Description=PiDog Monitor — vérification périodique (15 min)
 
 [Timer]
-OnBootSec=30
-OnUnitActiveSec=60min
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=30s
+RandomizedDelaySec=15s
 Persistent=true
 Unit=pidog-monitor.service
 

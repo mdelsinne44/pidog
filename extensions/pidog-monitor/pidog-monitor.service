@@ -1,28 +1,22 @@
 [Unit]
-Description=PiDog Monitor - vérification santé au démarrage + état du service robot
-After=network-online.target pidog.service
+Description=PiDog Monitor — diagnostic santé (boot + périodique)
+Documentation=file:///home/mdelsinne/pidog/extensions/pidog-monitor/README.md
+After=network-online.target
 Wants=network-online.target
-# Si le service pidog (robot) est absent, le moniteur le signale
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh
-# Vérification du nouveau service pidog (le robot)
-ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog.service || echo "[MONITOR] SERVICE PIDOG INACTIF" | logger -t pidog-monitor'
-# Vérification de l'agent (stream vocal)
-ExecStartPost=/bin/sh -c 'systemctl is-active --quiet pidog-agent-stream.service && echo "[MONITOR] AGENT ACTIF" || echo "[MONITOR] AGENT INACTIF" | logger -t pidog-monitor'
-# Si le script échoue → système considère comme failed → relance
-Restart=on-failure
-RestartSec=30
-# WatchdogSec : pas de réponse > 120 s → relance
-WatchdogSec=120
-Environment=PIDOG_MONITOR_INTERVAL=60
-Environment=HEALTH_DELAY=120
-StandardOutput=journal
-StandardError=journal
+User=mdelsinne
+Group=mdelsinne
+Environment=MON_BOOT_LOG=/home/mdelsinne/mon-boot.log
+Environment=MON_STATE_FILE=/tmp/pidog-monitor.state
+ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh check
+TimeoutStartSec=30
+Nice=10
+# PAS de Restart= ni de WatchdogSec= ici : sur un Type=oneshot ils provoquent
+# une boucle de redémarrage (567 démarrages en 20 h constatés le 02/11) et le
+# watchdog est de toute façon ignoré. La périodicité est assurée par
+# pidog-monitor.timer ; l'échec est visible via `systemctl --failed`.
 
 [Install]
 WantedBy=multi-user.target
