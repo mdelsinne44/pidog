@@ -373,11 +373,16 @@ _ALLOWED_CALLS = {
     "ears.read",
 }
 
+# Anciens raccourcis texte (dog.command / dog.do_action).
+# Format head_move : [yaw, roll, pitch].
+#   yaw > 0 → gauche ; roll > 0 → penche à droite ; pitch > 0 → lève le museau.
+# head_up/head_down étaient mappés sur « roll » (la tête se penchait sur le
+# côté au lieu de monter/descendre) : corrigé.
 _HEAD_SHORTCUTS = {
-    "head_down": [[0, -25, 0]],
-    "head_up": [[0, 25, 0]],
-    "head_left": [[-30, 0, 0]],
-    "head_right": [[30, 0, 0]],
+    "head_down": [[0, 0, -25]],
+    "head_up": [[0, 0, 25]],
+    "head_left": [[30, 0, 0]],
+    "head_right": [[-30, 0, 0]],
 }
 
 

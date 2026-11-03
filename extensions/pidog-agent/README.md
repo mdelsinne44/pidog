@@ -9,7 +9,8 @@ pidog.service      daemon unique : GPIO, socket /tmp/pidog.sock, RPC
    ├── agent cli      terminal / SSH : agent à outils, réponses techniques
    └── agent stream   voix : Vosk (veille) → LLM → Piper → JBL
 memory.py          mémoire locale SQLite + FTS5 (RAG lexical)
-tools.py           14 outils partagés (function calling)
+tools.py           18 outils partagés (function calling)
+tests/             non-régression : directions de tête, shell, exécution de code
 pidog_prompt.py    prompts partagés : voice_prompt() / cli_prompt()
 pidog-monitor      health-check systemd (oneshot + timer 15 min)
 ```
@@ -34,11 +35,38 @@ Le CLI n'est plus un chat à protocole texte : il appelle de vrais **outils**
 | `sys_info` | uptime, charge, RAM, disque, température, throttling |
 | `sys_services` / `sys_logs` | états et journaux systemd (whitelist) |
 | `service_ctl` | start/stop/restart — **seulement sur demande explicite** |
-| `shell` | commandes de **lecture** seulement (`PIDOG_SHELL_MODE`) |
+| `shell` | commandes dans `~/pidog` (pipes/`&&` acceptés, destructif refusé) |
+| `run_python` | écrit et exécute un script Python (timeout 30 s) |
+| `write_file` | crée/remplace un fichier sous `~/pidog` |
+| `web_search` | recherche DuckDuckGo (titres, URLs, extraits) |
+| `fetch_url` | lit une page http(s) (Wikipédia via API REST) |
 | `weather`, `media`, `self_info` | météo, Kodi/RetroPie/TV/radio, auto-description |
 
-Commandes de session : `/state /actions /mem <q> /remember k = v /forget <clé>
-/stats /model [nom] /reset /debug /quit`.
+Commandes de session : `/state /actions /mem <q> /web <q> /run <code>
+/remember k = v /forget <clé> /stats /model [nom] /reset /debug /quit`.
+
+### Modes `shell` (`PIDOG_SHELL_MODE`)
+
+| Mode | Comportement |
+|---|---|
+| `readonly` | liste blanche historique, pas de `|`, `>`, `$` |
+| `workspace` *(défaut)* | `bash -lc` dans `~/pidog` : pipes, `&&`, redirections ; `sudo`, `reboot`, `mkfs`, `rm -rf /`, `systemctl stop`… refusés |
+| `full` | aucune vérification (assumé) |
+| `off` | aucun accès shell/code |
+
+`run_python` et `write_file` respectent `PIDOG_WORKSPACE` (défaut `~/pidog`).
+
+### Directions de tête
+
+Convention unique, vérifiée et testée (`tests/test_head_directions.py`) :
+
+- `turn_head_left` / `look_left` → **yaw positif** (gauche du chien)
+- `turn_head_right` / `look_right` → **yaw négatif** (droite)
+- `tilt_left` / `tilt_right` → roll négatif / positif
+- `head_up` / `head_down` → pitch positif / négatif (jamais du roll)
+
+Les rotations horizontales passent par `head_move_raw([yaw, 0, 0])` : lacet
+pur, sans mélange roll/pitch, donc plus de tête qui « penche » en tournant.
 
 Options :
 

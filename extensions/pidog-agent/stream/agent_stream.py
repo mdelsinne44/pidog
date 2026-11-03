@@ -287,8 +287,10 @@ def dog_head(yaw: float = 0, pitch: float = 0):
     if dog is None:
         return
     try:
+        # head_move attend [yaw, roll, pitch] : le pitch était passé en 2e
+        # position (roll), d'où une tête qui penchait au lieu de monter.
         # Vitesse basse : la tête vibre au-delà (~overshoot servo connu).
-        dog.head_move([[yaw, pitch, 0]], immediately=True, speed=30)
+        dog.head_move([[yaw, 0, pitch]], immediately=True, speed=30)
     except Exception:
         pass
 

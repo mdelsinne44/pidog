@@ -27,8 +27,11 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from html.parser import HTMLParser
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 # Bootstrap des chemins : tools.py doit fonctionner seul (python3 tools.py)
 # comme importé par le CLI ou le stream.
@@ -41,8 +44,20 @@ for _path in (_REPO, _HERE):
 import memory
 
 MAX_OUTPUT = 4000          # caractères renvoyés au LLM par outil
-SHELL_TIMEOUT = 15
-SHELL_MODE = os.getenv("PIDOG_SHELL_MODE", "readonly").strip().lower()
+SHELL_TIMEOUT = int(os.getenv("PIDOG_SHELL_TIMEOUT", "30"))
+# read-only = liste blanche historique · workspace = tout sauf le dangereux,
+# cwd confiné au dépôt · full = aucune vérification · off = désactivé.
+SHELL_MODE = os.getenv("PIDOG_SHELL_MODE", "workspace").strip().lower()
+SHELL_WORKDIR = os.path.expanduser(os.getenv("PIDOG_SHELL_CWD", "~/pidog"))
+WORKSPACE_ROOTS: List[str] = [
+    os.path.realpath(os.path.expanduser(p.strip()))
+    for p in os.getenv("PIDOG_WORKSPACE", "~/pidog").split(",")
+    if p.strip()
+]
+USER_AGENT = os.getenv(
+    "PIDOG_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux armv7l) PiDogAgent/1.0 (+https://github.com/sunfounder/pidog)",
+)
 CITY_DEFAULT = os.getenv("PIDOG_CITY", "Nantes")
 
 _env_cache: Dict[str, Any] = {"at": 0.0, "value": {}}
@@ -72,16 +87,18 @@ TOOLS: List[Dict[str, Any]] = [
         "patte, marche, sons, tension). Le daemon gère posture et batterie.",
         {
             "action": {"type": "string",
-                       "description": "posture, head_gesture, led, wag, tail, "
+                       "description": "posture, head, head_gesture, "
+                                      "turn_head_left, turn_head_right, "
+                                      "head_center, look, led, wag, tail, "
                                       "lift_paw, wave_paw, handshake, high_five, "
-                                      "walk, turn, trot, stretch, push_up, "
-                                      "celebrate, bark, howl, sound, battery, "
-                                      "stop, rest, head"},
+                                      "bow, groove, walk, turn, trot, stretch, "
+                                      "push_up, celebrate, bark, howl, sound, "
+                                      "battery, stop, rest"},
             "params": {"type": "object", "additionalProperties": True,
                        "description": "ex. {\"name\":\"sit\"}, "
                                       "{\"color\":\"rainbow\"}, "
                                       "{\"direction\":\"forward\",\"steps\":1,"
-                                      "\"speed\":80}"},
+                                      "\"speed\":98}"},
         },
         ["action"],
     ),
@@ -120,11 +137,39 @@ TOOLS: List[Dict[str, Any]] = [
                       "description": "true seulement si Martin l'a demandé"}},
         ["action", "unit"]),
     _fn("shell",
-        "Commande shell de LECTURE (ls, cat, grep, tail, df, systemctl status, "
-        "journalctl, git log…). Pas d'écriture, pas de sudo.",
-        {"cmd": {"type": "string", "description": "commande simple, sans | ni >"},
+        "Exécute une commande shell dans ~/pidog (pipes et && acceptés). "
+        "Mode workspace par défaut : commandes système destructrices refusées. "
+        "Utilise-la pour git, ls, cat, grep, systemctl status, journalctl…",
+        {"cmd": {"type": "string",
+                 "description": "ligne de commande complète (ex. \"git status --short | head\")"},
          "cwd": {"type": "string", "description": "défaut ~/pidog"}},
         ["cmd"]),
+    _fn("run_python",
+        "Écrit puis exécute un script Python (cwd = ~/pidog, timeout 30 s). "
+        "À utiliser pour calculer, tester une idée ou lancer un bout de code "
+        "du dépôt. Les imports locaux (pidog, memory, tools…) sont disponibles.",
+        {"code": {"type": "string", "description": "code Python complet"},
+         "timeout": {"type": "integer", "description": "secondes, 1..120 (défaut 30)"}},
+        ["code"]),
+    _fn("write_file",
+        "Crée ou remplace un fichier texte dans le dépôt (~/pidog). "
+        "Refusé hors du workspace et en mode readonly.",
+        {"path": {"type": "string", "description": "chemin relatif à ~/pidog ou absolu sous ~/pidog"},
+         "content": {"type": "string"},
+         "mode": {"type": "string", "enum": ["overwrite", "append"]}},
+        ["path", "content"]),
+    _fn("web_search",
+        "Recherche Internet (DuckDuckGo) : titres, URLs et extraits. "
+        "Enchaîne avec fetch_url pour lire une page.",
+        {"query": {"type": "string"},
+         "k": {"type": "integer", "description": "nombre de résultats, défaut 5, max 10"}},
+        ["query"]),
+    _fn("fetch_url",
+        "Télécharge une page http(s) et renvoie son texte (HTML converti). "
+        "Pour la météo préfère weather ; pour une page précise, colle son URL.",
+        {"url": {"type": "string"},
+         "max_chars": {"type": "integer", "description": "défaut 6000, max 20000"}},
+        ["url"]),
     _fn("weather", "Météo actuelle (open-meteo).",
         {"city": {"type": "string"}}),
     _fn("media", "Kodi, RetroPie, TV (HDMI-CEC) ou webradio FIP/NOVA.",
@@ -341,7 +386,48 @@ def _service_ctl(args: Dict[str, Any]) -> Dict[str, Any]:
             "active": check["stdout"]}
 
 
-# Lecture seule : premier mot + sous-commande éventuellement contrôlés.
+# ------------------------------------------------------------------ fichiers --
+def _within_workspace(path: str) -> Optional[str]:
+    """Chemin absolu réel s'il est dans le workspace, sinon None."""
+    try:
+        real = os.path.realpath(os.path.expanduser(path))
+    except Exception:
+        return None
+    for root in WORKSPACE_ROOTS:
+        if real == root or real.startswith(root + os.sep):
+            return real
+    return None
+
+
+def _workspace_cwd(raw: Optional[str]) -> str:
+    candidate = os.path.expanduser(raw or SHELL_WORKDIR)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(SHELL_WORKDIR, candidate)
+    real = _within_workspace(candidate) or os.path.realpath(SHELL_WORKDIR)
+    return real if os.path.isdir(real) else os.path.realpath(SHELL_WORKDIR)
+
+
+# ------------------------------------------------------------------- shell ---
+# Commandes refusées en mode « workspace » : destructrices ou système.
+_DANGEROUS = re.compile(
+    r"""
+      \bsudo\b
+    | \b(mkfs(\.\w+)?|fdisk|parted|wipefs|mkswap)\b
+    | \bdd\s+[^\n]*\bof=/dev/
+    | \b(shutdown|reboot|poweroff|halt)\b
+    | \bsystemctl\s+(stop|disable|mask|kill|isolate)\b
+    | \b(rm)\s+(-[a-zA-Z]*\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+(/|~|\$HOME|/home)/?\s*$
+    | \bch(mod|own)\s+-R\s+\S+\s+/(\s|$)
+    | \bgit\s+push\b[^\n]*--force
+    | :\s*\(\s*\)\s*\{
+    | \b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b
+    | >\s*/dev/(sd|mmcblk|nvme|hd)
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+# Mode readonly : premier mot + sous-commande éventuellement contrôlés.
 _READ_BINARIES = {
     "ls", "cat", "head", "tail", "grep", "rg", "wc", "find", "du", "df",
     "free", "uptime", "uname", "hostname", "date", "whoami", "id", "ps",
@@ -368,11 +454,18 @@ def _shell(args: Dict[str, Any]) -> Dict[str, Any]:
     raw = str(args.get("cmd") or "").strip()
     if not raw:
         return {"ok": False, "error": "commande vide"}
-    if SHELL_MODE != "full":
+    if len(raw) > 2000:
+        return {"ok": False, "error": "commande trop longue (max 2000 car.)"}
+
+    cwd = _workspace_cwd(args.get("cwd"))
+
+    if SHELL_MODE == "readonly":
+        # Mode historique : liste blanche, pas de composition de commandes.
         if _FORBIDDEN.search(raw):
             return {"ok": False,
-                    "error": "caractères de composition interdits en mode "
-                             "readonly (; | > < ` $)".replace("$", "$")}
+                    "error": "mode readonly : ; | > < ` $ interdits "
+                             "(passe PIDOG_SHELL_MODE=workspace pour les "
+                             "pipes et l'écriture dans ~/pidog)"}
         try:
             parts = shlex.split(raw)
         except ValueError as exc:
@@ -391,13 +484,340 @@ def _shell(args: Dict[str, Any]) -> Dict[str, Any]:
                         "allowed": sorted(allowed)}
         elif binary not in _READ_BINARIES:
             return {"ok": False, "error": f"commande non autorisée : {binary}",
-                    "hint": "PIDOG_SHELL_MODE=full pour tout autoriser"}
-    cwd = os.path.expanduser(str(args.get("cwd") or "~/pidog"))
-    if not os.path.isdir(cwd):
-        cwd = os.path.expanduser("~")
-    res = _run(raw, timeout=SHELL_TIMEOUT, cwd=cwd) if SHELL_MODE == "full" \
-        else _run(shlex.split(raw), timeout=SHELL_TIMEOUT, cwd=cwd)
-    return {"ok": res["returncode"] == 0, "cmd": raw, **res}
+                    "hint": "PIDOG_SHELL_MODE=workspace pour exécuter du code "
+                            "et des commandes dans ~/pidog"}
+        cmd: Any = parts
+    else:
+        if SHELL_MODE != "full" and _DANGEROUS.search(raw):
+            return {"ok": False,
+                    "error": "commande refusée : opération destructrice ou "
+                             "système (sudo, reboot, mkfs, rm -rf /, "
+                             "systemctl stop…). PIDOG_SHELL_MODE=full pour "
+                             "passer outre."}
+        # bash -lc : pipes, &&, redirections et variables fonctionnent.
+        cmd = ["/bin/bash", "-lc", raw]
+
+    res = _run(cmd, timeout=SHELL_TIMEOUT, cwd=cwd)
+    return {"ok": res["returncode"] == 0, "cmd": raw, "cwd": cwd, **res}
+
+
+def _run_python(args: Dict[str, Any]) -> Dict[str, Any]:
+    if SHELL_MODE == "off":
+        return {"ok": False, "error": "exécution désactivée (PIDOG_SHELL_MODE=off)"}
+    code = str(args.get("code") or "")
+    if not code.strip():
+        return {"ok": False, "error": "code vide"}
+    if len(code) > 20000:
+        return {"ok": False, "error": "code trop long (max 20 000 car.)"}
+    timeout = args.get("timeout") or SHELL_TIMEOUT
+    try:
+        timeout = max(1, min(120, int(timeout)))
+    except Exception:
+        timeout = SHELL_TIMEOUT
+    cwd = os.path.realpath(SHELL_WORKDIR)
+    script_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".py", prefix="pidog_run_",
+                dir=os.path.expanduser("~"), delete=False,
+                encoding="utf-8") as handle:
+            handle.write(code)
+            script_path = handle.name
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [_REPO, os.path.join(_REPO, "pidog"), _HERE]
+            + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        proc = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
+        )
+        return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+                "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip(),
+                "timeout_s": timeout}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"timeout {timeout}s",
+                "hint": "découpe le code ou augmente timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        if script_path:
+            try:
+                os.unlink(script_path)
+            except Exception:
+                pass
+
+
+def _write_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    if SHELL_MODE in ("off", "readonly"):
+        return {"ok": False,
+                "error": "écriture refusée en mode readonly/off "
+                         "(PIDOG_SHELL_MODE=workspace)"}
+    raw_path = str(args.get("path") or "").strip()
+    if not raw_path:
+        return {"ok": False, "error": "chemin manquant"}
+    if not os.path.isabs(raw_path):
+        raw_path = os.path.join(SHELL_WORKDIR, raw_path)
+    path = _within_workspace(raw_path)
+    if path is None:
+        return {"ok": False, "error": f"chemin hors workspace : {raw_path}",
+                "allowed_roots": WORKSPACE_ROOTS}
+    relative = path
+    for root in WORKSPACE_ROOTS:
+        if path == root or path.startswith(root + os.sep):
+            relative = os.path.relpath(path, root)
+            break
+    parts = set(relative.split(os.sep))
+    if ".git" in parts or "models" in parts or "data" in parts \
+            or os.path.basename(path) == ".env":
+        return {"ok": False,
+                "error": "écriture refusée : .env, .git, data/ et models/ sont "
+                         "protégés"}
+    content = args.get("content")
+    if content is None:
+        return {"ok": False, "error": "content manquant"}
+    content = str(content)
+    if len(content) > 200000:
+        return {"ok": False, "error": "contenu trop long (max 200 000 car.)"}
+    mode = "a" if str(args.get("mode") or "").lower() == "append" else "w"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, mode, encoding="utf-8") as handle:
+            handle.write(content)
+        return {"ok": True, "path": path, "mode": "append" if mode == "a" else "overwrite",
+                "bytes": len(content.encode("utf-8"))}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# --------------------------------------------------------------- internet ----
+class _HTMLText(HTMLParser):
+    """Convertit du HTML en texte lisible (sans script/style)."""
+
+    _SKIP = {"script", "style", "noscript", "svg", "template", "nav",
+             "aside", "form", "button", "select", "textarea",
+             "iframe", "footer"}
+    _BLOCKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5",
+               "h6", "section", "article", "header", "footer", "table"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: List[str] = []
+        self.main_parts: List[str] = []
+        self._skip = 0
+        self._main = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+        elif tag in self._BLOCKS:
+            self.parts.append("\n")
+        if tag in ("main", "article"):
+            self._main += 1
+            if self._main == 1:
+                self.main_parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip:
+            self._skip -= 1
+        elif tag in self._BLOCKS:
+            self.parts.append("\n")
+        if tag in ("main", "article") and self._main:
+            self._main -= 1
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        self.parts.append(data)
+        if self._main:
+            self.main_parts.append(data)
+
+    def text(self) -> str:
+        def clean(chunks: List[str]) -> str:
+            raw = "".join(chunks)
+            raw = re.sub(r"[ \t\f\v]+", " ", raw)
+            raw = re.sub(r"\n\s*\n+", "\n", raw)
+            return raw.strip()
+
+        main = clean(self.main_parts)
+        # <main>/<article> quand il existe (Wikipedia, blogs, docs) : évite les
+        # menus et barres latérales qui polluaient le début du texte.
+        return main if len(main) > 200 else clean(self.parts)
+
+
+def _html_to_text(html_text: str) -> str:
+    parser = _HTMLText()
+    try:
+        parser.feed(html_text)
+        return parser.text()
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", html_text)
+
+
+def _clean_ddg_url(href: str) -> str:
+    href = (href or "").strip()
+    if href.startswith("//"):
+        href = "https:" + href
+    if "uddg=" in href:
+        values = parse_qs(urlparse(href).query).get("uddg")
+        if values:
+            return values[0]
+    return href
+
+
+def _strip_tags(fragment: str) -> str:
+    return _html_to_text(fragment or "")
+
+
+def _web_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "error": "requête vide"}
+    try:
+        k = max(1, min(10, int(args.get("k") or 5)))
+    except Exception:
+        k = 5
+    try:
+        import requests
+    except Exception as exc:
+        return {"ok": False, "error": f"requests indisponible : {exc}"}
+
+    endpoints = (
+        ("html", "https://html.duckduckgo.com/html/",
+         {"q": query, "kl": "fr-fr"}),
+        ("lite", "https://lite.duckduckgo.com/lite/", {"q": query}),
+    )
+    last_error = ""
+    for kind, url, data in endpoints:
+        try:
+            response = requests.post(
+                url, data=data,
+                headers={"User-Agent": USER_AGENT,
+                         "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.6"},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                last_error = f"HTTP {response.status_code} ({kind})"
+                continue
+            page = response.text
+            results: List[Dict[str, str]] = []
+            if kind == "html":
+                anchors = re.findall(
+                    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                    page, re.S)
+                snippets = re.findall(
+                    r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+                    page, re.S)
+            else:
+                anchors = re.findall(
+                    r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                    page, re.S)
+                snippets = re.findall(
+                    r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>', page, re.S)
+            for index, (href, title) in enumerate(anchors[:k]):
+                snippet = _strip_tags(snippets[index]) if index < len(snippets) else ""
+                results.append({
+                    "title": _strip_tags(title),
+                    "url": _clean_ddg_url(href),
+                    "snippet": snippet[:200],
+                })
+            if results:
+                return {"ok": True, "query": query, "engine": kind,
+                        "results": results}
+            last_error = f"aucun résultat parsé ({kind})"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+    return {"ok": False, "error": last_error or "recherche impossible",
+            "hint": "vérifie la connexion Internet ; sinon utilise fetch_url "
+                    "sur une URL connue (fr.wikipedia.org, etc.)"}
+
+
+def _wikipedia_summary(url: str, max_chars: int) -> Optional[Dict[str, Any]]:
+    """Raccourci Wikipédia : l'API REST évite les menus de la page HTML."""
+    match = re.match(
+        r"^https?://([a-z]{2,3}(?:-[a-z]+)?)\.(?:m\.)?wikipedia\.org/wiki/([^?#]+)",
+        url, re.I)
+    if not match:
+        return None
+    lang, title = match.group(1), match.group(2)
+    api = (f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+           f"{title}")
+    try:
+        import requests
+        response = requests.get(api, headers={"User-Agent": USER_AGENT},
+                                timeout=10)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+    except Exception:
+        return None
+    text = data.get("extract") or ""
+    if not text:
+        return None
+    description = data.get("description")
+    if description and description not in text:
+        text = f"{description}.\n{text}"
+    return {"ok": True, "url": data.get("content_urls", {})
+            .get("desktop", {}).get("page", url),
+            "source": "wikipedia-api",
+            "title": data.get("title", ""),
+            "chars": len(text), "truncated": len(text) > max_chars,
+            "text": text[:max_chars]}
+
+
+def _fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    url = str(args.get("url") or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        return {"ok": False, "error": "URL http(s) uniquement"}
+    try:
+        max_chars = max(500, min(20000, int(args.get("max_chars") or 6000)))
+    except Exception:
+        max_chars = 6000
+    summary = _wikipedia_summary(url, max_chars)
+    if summary is not None:
+        return summary
+    try:
+        import requests
+    except Exception as exc:
+        return {"ok": False, "error": f"requests indisponible : {exc}"}
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT,
+                     "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.6"},
+            timeout=(8, 25), stream=True, allow_redirects=True,
+        )
+        if response.status_code != 200:
+            return {"ok": False, "error": f"HTTP {response.status_code}",
+                    "url": response.url}
+        content_type = response.headers.get("content-type", "").lower()
+        raw = response.raw.read(2 * 1024 * 1024 + 1, decode_content=True)
+        truncated_bytes = len(raw) > 2 * 1024 * 1024
+        raw = raw[:2 * 1024 * 1024]
+        encoding = response.encoding or "utf-8"
+        try:
+            text = raw.decode(encoding, errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+        if "html" in content_type or "xml" in content_type:
+            text = _html_to_text(text)
+        elif "json" in content_type:
+            try:
+                text = json.dumps(json.loads(text), ensure_ascii=False, indent=1)
+            except Exception:
+                pass
+        elif "text" not in content_type and not text.lstrip().startswith(("{", "[", "<")):
+            return {"ok": False,
+                    "error": f"contenu non textuel ({content_type or 'inconnu'})",
+                    "url": response.url}
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text).strip()
+        return {"ok": True, "url": response.url, "content_type": content_type,
+                "chars": len(text), "truncated": truncated_bytes
+                or len(text) > max_chars,
+                "text": text[:max_chars]}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "url": url}
 
 
 _WEATHER_FR = {
@@ -488,6 +908,10 @@ _HANDLERS = {
     "sys_logs": _sys_logs,
     "service_ctl": _service_ctl,
     "shell": _shell,
+    "run_python": _run_python,
+    "write_file": _write_file,
+    "web_search": _web_search,
+    "fetch_url": _fetch_url,
     "weather": _weather,
     "media": _media,
     "self_info": _self_info,

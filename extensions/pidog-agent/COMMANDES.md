@@ -24,10 +24,15 @@ Règles appliquées par les outils (pas par le prompt) :
 
 - `service_ctl` refuse `start/stop/restart` sur `pidog` et
   `pidog-agent-stream` sans `explicit=true` — donc pas de démarrage surprise.
-- `shell` est en **lecture seule** : liste blanche de binaires et de
-  sous-commandes (`systemctl status`, `journalctl`, `git log`,
-  `pactl`, `vcgencmd`, …), pas de `sudo`, pas de `|`, `>` ni `$`.
-  Passer `PIDOG_SHELL_MODE=full` pour tout autoriser (assumé).
+- `shell` travaille dans `~/pidog` en mode `workspace` par défaut : pipes,
+  `&&` et redirections fonctionnent ; `sudo`, `reboot`, `mkfs`, `rm -rf /`,
+  `systemctl stop`… sont refusés par le code. `PIDOG_SHELL_MODE=readonly`
+  restaure la liste blanche historique, `full` désactive les contrôles.
+- `run_python` écrit et exécute un script Python (cwd `~/pidog`, timeout 30 s,
+  imports locaux disponibles) ; `write_file` crée un fichier sous
+  `PIDOG_WORKSPACE`. Ce sont les outils à utiliser pour **exécuter du code**.
+- `web_search` (DuckDuckGo) + `fetch_url` donnent l'accès Internet ;
+  `fetch_url` utilise l'API REST pour Wikipédia (pas les menus HTML).
 - `robot_action` refuse `reboot`/`shutdown` : demande explicite requise.
 
 Commandes de session :
@@ -37,6 +42,8 @@ Commandes de session :
 | `/state` | état robot + services (2 outils) |
 | `/actions` | catalogue d'actions physiques |
 | `/mem <texte>` | recherche mémoire (BM25 + récence) |
+| `/web <requête>` | recherche Internet (DuckDuckGo) |
+| `/run <code>` | exécute un script Python dans `~/pidog` |
 | `/remember clé = valeur` | ajoute un fait durable |
 | `/forget <clé>` | désactive une entrée |
 | `/stats` | stats mémoire + modèle + taille d'historique |
@@ -69,6 +76,7 @@ Tout passe par `dog.action(...)`, une couche **sûre** côté daemon :
 | Posture | `dog.action("posture", name="stand"|"sit"|"lie"|"half_sit")` |
 | Tête | `dog.action("head", yaw=20, pitch=10, speed=30)` |
 | Gestes tête | `nod`, `shake`, `tilt_left`, `tilt_right`, `look_left`, `look_right`, `look_up`, `look_down`, `center` |
+| Rotation tête | `dog.action("turn_head_left")`, `turn_head_right`, `head_center` — gauche = yaw **positif** |
 | Queue | `dog.action("tail", angle=25)`, `dog.action("wag", times=4, amplitude=30)` |
 | LED / guirlandes | `dog.action("led", color="rainbow", style="breath", brightness=0.7)` |
 | Sons | `dog.action("sound", name="bark"|"growl"|"happy"|"sad"|"howl"|"pant")` |

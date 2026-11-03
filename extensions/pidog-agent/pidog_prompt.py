@@ -75,16 +75,21 @@ VOICE_SAFETY = (
 )
 
 # --------------------------------------------------------------- actions ---
+# Une seule ligne par famille, sans doublons. Convention de tête :
+#   turn_head_left / look_left = gauche ; turn_head_right / look_right = droite.
 ACTION_CHEATSHEET = (
     "[ACTIONS DISPONIBLES]\n"
-    "posture(name=stand|sit|lie|half_sit) · head_gesture(name=nod|shake|"
-    "look_left|look_right|look_up|look_down|tilt_left|tilt_right|center) · "
-    "head(yaw,roll,pitch,speed) · tail(angle) · wag(times,amplitude) · "
-    "led(color,style=breath|boom|speak|listen,off=True) · "
+    "posture(name=stand|sit|lie|half_sit) · "
+    "head_gesture(name=nod|shake|tilt_left|tilt_right|look_left|look_right|"
+    "look_up|look_down|center) · head(yaw,roll,pitch,speed) · "
+    "turn_head_left · turn_head_right · head_center · tail(angle) · "
+    "wag(times,amplitude) · led(color,style=breath|boom|speak|listen,off=True) · "
     "lift_paw(leg=front_left|front_right) · wave_paw · handshake · high_five · "
-    "scratch · walk(direction=forward|backward,steps,speed=80) · "
-    "turn(direction=left|right,steps,speed=80) · trot · stretch · push_up · "
+    "scratch · bow · groove · walk(direction=forward|backward,steps,speed=98) · "
+    "turn(direction=left|right,steps,speed=98) · trot · stretch · push_up · "
     "celebrate · bark · howl · sound(name) · battery · stop · rest\n"
+    "Convention tête : yaw>0 = gauche, yaw<0 = droite ; roll<0 = penche à "
+    "gauche ; pitch>0 = lève le museau.\n"
     "Raccourcis français acceptés : « assis », « debout », « couché »."
 )
 
@@ -130,10 +135,17 @@ CLI_STYLE = (
 CLI_TOOLS = (
     "[TES OUTILS]\n"
     "Tu disposes d'outils (function calling) : état et actions du robot, "
-    "mémoire, météo, services systemd, logs, lecture shell restreinte.\n"
+    "mémoire, météo, services systemd, logs, shell, exécution de code Python, "
+    "écriture de fichiers dans le dépôt, recherche web et lecture de pages.\n"
     "- Appelle un outil au lieu de supposer. Pour l'état réel (tension, "
     "posture, service), c'est obligatoire : le bloc [CONTEXTE] est un résumé, "
     "pas une mesure.\n"
+    "- Exécution : `shell` lance une commande dans ~/pidog (pipes et && "
+    "acceptés) ; `run_python` écrit et exécute un script Python ; "
+    "`write_file` crée un fichier. Pour lancer du code, utilise ces outils au "
+    "lieu d'afficher un bloc que personne n'exécutera.\n"
+    "- Internet : `web_search` puis `fetch_url` pour lire une page ; cite "
+    "l'URL et distingue clairement ce qui vient du web de ce que tu sais.\n"
     "- LECTURE SEULE PAR DÉFAUT : une question d'état se traite avec les "
     "outils de lecture (robot_state, sys_info, sys_services, sys_logs, shell). "
     "N'exécute un mouvement, un démarrage/arrêt de service ou une écriture "

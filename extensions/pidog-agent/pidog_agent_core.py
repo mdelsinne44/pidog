@@ -55,11 +55,15 @@ def head_toward_sound():
             break
         sleep(0.1)
     if detected and direction >= 0:
-        yaw = (direction - 160) % 360
-        if yaw > 90:
-            yaw = 90
-        elif yaw < -90:
-            yaw = -90
+        # Convention du module : 0 = devant, 90 = droite, 270 = gauche.
+        # yaw positif = gauche (cf. pidog/robot_actions.py).
+        if 0 < direction < 180:
+            yaw = -direction          # son à droite → yaw négatif
+        elif 180 < direction < 360:
+            yaw = 360 - direction     # son à gauche → yaw positif
+        else:
+            yaw = 0
+        yaw = max(-80, min(80, yaw))
         d.head_move([[yaw, 0, 0]], immediately=True, speed=50)
         d.wait_all_done()
         d.stable()

@@ -53,6 +53,31 @@ __all__ = [
 VOLTAGE_WARN = float(os.getenv("PIDOG_VOLTAGE_WARN", "6.90"))
 VOLTAGE_MIN = float(os.getenv("PIDOG_VOLTAGE_MIN", "6.45"))
 
+# ── Vitesse de locomotion ────────────────────────────────────────────────────
+# Attention : la vitesse n'est PAS linéaire. servo_move() (robot_hat) calcule
+#     total_time = -9.9 * speed + 1000   (ms par image de marche)
+# donc 80 = 208 ms/image, 90 = 109 ms, 98 = 58 ms. Un pas fait 49 images :
+# à 80 ça donne ~10 s par pas, à 98 ~1,7 s. D'où le défaut à 98.
+# Réglable sans toucher au code : PIDOG_WALK_SPEED dans l'environnement.
+WALK_SPEED = max(0, min(100, int(os.getenv("PIDOG_WALK_SPEED", "98"))))
+
+# ── Tête : convention de sens (UNE seule source de vérité) ───────────────────
+# Vérifié sur le matériel et recoupé avec examples/7_face_track.py :
+#   yaw > 0  → la tête tourne à GAUCHE (du point de vue du chien)
+#   yaw < 0  → la tête tourne à DROITE
+#   roll > 0 → penche à DROITE ; roll < 0 → penche à GAUCHE
+#   pitch > 0 → lève le museau  ; pitch < 0 → baisse le museau
+# Ne jamais inverser ces signes ailleurs : service.py, local_actions.py et
+# stream/agent_stream.py s'appuient sur cette convention.
+_HEAD_YAW = max(10, min(80, int(os.getenv("HEAD_LEFT_YAW", "30"))))
+# Filet de sécurité si un lot de servo était monté à l'envers : -1 inverse
+# gauche/droite *partout* sans toucher au code.
+HEAD_YAW_SIGN = -1 if os.getenv("HEAD_YAW_SIGN", "1").strip().startswith("-") else 1
+HEAD_LEFT_YAW = _HEAD_YAW * HEAD_YAW_SIGN
+HEAD_RIGHT_YAW = -HEAD_LEFT_YAW
+HEAD_TILT_ROLL = max(10, min(55, int(os.getenv("HEAD_TILT_ROLL", "25"))))
+HEAD_TURN_SPEED = max(10, min(45, int(os.getenv("HEAD_TURN_SPEED", "30"))))
+
 # ── Postures connues et actions motrices ─────────────────────────────────────
 POSTURES = ("stand", "sit", "lie", "half_sit", "lie_with_hands_out")
 POSTURE_FR = {
@@ -70,9 +95,10 @@ POSTURE_FR = {
 GAITS = ("forward", "backward", "turn_left", "turn_right", "trot")
 
 # Anciens raccourcis : dog.command("head_left") / do_action("head_left").
+# Mêmes signes que HEAD_LEFT_YAW / HEAD_RIGHT_YAW ci-dessus.
 HEAD_SHORTCUTS = {
-    "head_left": (-30, 0, 0),
-    "head_right": (30, 0, 0),
+    "head_left": (HEAD_LEFT_YAW, 0, 0),
+    "head_right": (HEAD_RIGHT_YAW, 0, 0),
     "head_up": (0, 0, 22),
     "head_down": (0, 0, -25),
 }
@@ -127,6 +153,17 @@ ACTION_ALIASES = {
     "nod": "head_gesture", "shake": "head_gesture",
     "tilt": "head_gesture", "tilt_left": "head_gesture",
     "tilt_right": "head_gesture",
+    # tête : contrôle du sens (cf. HEAD_LEFT_YAW / HEAD_RIGHT_YAW)
+    "tourne_tete_gauche": "turn_head_left", "turn_head_left": "turn_head_left",
+    "tourne_tete_droite": "turn_head_right", "turn_head_right": "turn_head_right",
+    "tourne_la_tete_a_gauche": "turn_head_left",
+    "tourne_la_tete_a_droite": "turn_head_right",
+    "tete_a_gauche": "turn_head_left", "tete_a_droite": "turn_head_right",
+    "regarde_gauche": "turn_head_left", "regarde_a_gauche": "turn_head_left",
+    "regarde_droite": "turn_head_right", "regarde_a_droite": "turn_head_right",
+    "look_left": "turn_head_left", "look_right": "turn_head_right",
+    "center": "head_center", "centre": "head_center",
+    "axe_centre": "head_center", "milieu": "head_center",
     # queue
     "queue": "wag", "tail": "wag", "remue": "wag",
     "remue_la_queue": "wag", "wag": "wag", "wag_tail": "wag",
@@ -403,19 +440,29 @@ class RobotActions:
 
     def head_gesture(self, name: str = "nod", speed: int = 30) -> str:
         key = normalize(name)
+        # Rotations horizontales : lacet pur (aucun roll/pitch → pas de
+        # « tête penchée »), même chemin que turn_head_left/right.
+        pure_yaw = {
+            "look_left": HEAD_LEFT_YAW, "regarde_gauche": HEAD_LEFT_YAW,
+            "look_right": HEAD_RIGHT_YAW, "regarde_droite": HEAD_RIGHT_YAW,
+            "center": 0.0, "centre": 0.0,
+        }
+        if key in pure_yaw:
+            self._look_yaw(pure_yaw[key], speed)
+            return key
         gestures = {
             "nod": [[0, 0, 12], [0, 0, -12], [0, 0, 10], [0, 0, 0]],
             "hoche": [[0, 0, 12], [0, 0, -12], [0, 0, 10], [0, 0, 0]],
             "shake": [[35, 0, 0], [-35, 0, 0], [30, 0, 0], [-30, 0, 0], [0, 0, 0]],
             "secoue": [[35, 0, 0], [-35, 0, 0], [30, 0, 0], [-30, 0, 0], [0, 0, 0]],
-            "tilt_left": [[0, -25, 15]],
-            "tilt_right": [[0, 25, 20]],
-            "penche_gauche": [[0, -25, 15]],
-            "penche_droite": [[0, 25, 20]],
-            "look_left": [[-35, 0, 0]],
-            "regarde_gauche": [[-35, 0, 0]],
-            "look_right": [[35, 0, 0]],
-            "regarde_droite": [[35, 0, 0]],
+            "tilt_left": [[0, -HEAD_TILT_ROLL, 15]],
+            "tilt_right": [[0, HEAD_TILT_ROLL, 20]],
+            "penche_gauche": [[0, -HEAD_TILT_ROLL, 15]],
+            "penche_droite": [[0, HEAD_TILT_ROLL, 20]],
+            "look_left": [[HEAD_LEFT_YAW, 0, 0]],
+            "regarde_gauche": [[HEAD_LEFT_YAW, 0, 0]],
+            "look_right": [[HEAD_RIGHT_YAW, 0, 0]],
+            "regarde_droite": [[HEAD_RIGHT_YAW, 0, 0]],
             "look_up": [[0, 0, 22]],
             "regarde_en_haut": [[0, 0, 22]],
             "look_down": [[0, 0, -25]],
@@ -617,7 +664,7 @@ class RobotActions:
 
     # ------------------------------------------------------------- locomotion
     def walk(self, direction: str = "forward", steps: int = 1,
-             speed: int = 80) -> Dict[str, Any]:
+             speed: Optional[int] = None) -> Dict[str, Any]:
         key = normalize(direction)
         if key in ("arriere", "arrière", "back", "backward", "recule"):
             key = "backward"
@@ -626,6 +673,7 @@ class RobotActions:
         else:
             raise ActionError("direction de marche : forward ou backward")
         steps = max(1, min(8, int(steps)))
+        speed = WALK_SPEED if speed is None else speed
         self._guard_power("marcher")
         with self._lock:
             self.posture("stand")
@@ -634,7 +682,7 @@ class RobotActions:
         return {"direction": key, "steps": steps}
 
     def turn(self, direction: str = "left", steps: int = 1,
-             speed: int = 80) -> Dict[str, Any]:
+             speed: Optional[int] = None) -> Dict[str, Any]:
         key = normalize(direction)
         if key in ("gauche", "left", "turn_left"):
             key = "turn_left"
@@ -643,6 +691,7 @@ class RobotActions:
         else:
             raise ActionError("direction de rotation : left ou right")
         steps = max(1, min(8, int(steps)))
+        speed = WALK_SPEED if speed is None else speed
         self._guard_power("tourner")
         with self._lock:
             self.posture("stand")
@@ -650,8 +699,9 @@ class RobotActions:
             self._sleep(0.25)
         return {"direction": key, "steps": steps}
 
-    def trot(self, steps: int = 1, speed: int = 80) -> Dict[str, Any]:
+    def trot(self, steps: int = 1, speed: Optional[int] = None) -> Dict[str, Any]:
         steps = max(1, min(6, int(steps)))
+        speed = WALK_SPEED if speed is None else speed
         self._guard_power("trotter")
         with self._lock:
             self.posture("stand")
@@ -683,6 +733,92 @@ class RobotActions:
             self.posture("stand")
             self._raw_action("push_up", step_count=times, speed=speed)
         return "push_up"
+
+    def bow(self, times: int = 1, speed: int = 30) -> str:
+        """Incline la tête sans changer de posture (révérence).
+        
+        :param times: nombre de révérences (1-3)
+        :param speed: vitesse de déplacement de la tête (10-45)
+        """
+        times = max(1, min(3, int(times)))
+        speed = max(10, min(45, int(speed)))
+        self._guard_power("faire une révérence")
+        with self._lock:
+            # La tête baisse de ~30° (pitch négatif), puis remonte à chaque tour.
+            for _ in range(times):
+                self._head([[0, 0, -30]], speed=speed)
+                self._head([[0, 0, 0]], speed=speed)
+        return "bow"
+
+    def _look_yaw(self, yaw: float, speed: int = HEAD_TURN_SPEED) -> str:
+        """Rotation de tête PURE en lacet (aucun roll/pitch parasite).
+
+        On passe par ``head_move_raw`` pour ne pas dépendre de
+        ``head_rpy_to_angle()`` : c'est ce mélange roll/pitch qui donnait
+        l'impression que la tête « penchait » quand on tournait.
+        """
+        speed = max(10, min(45, int(speed)))
+        yaw = max(-80.0, min(80.0, float(yaw)))
+        self._guard_power("tourner la tête")
+        with self._lock:
+            self._head_raw([[yaw, 0, 0]], speed=speed)
+        return yaw
+
+    def look(self, direction: str = "left", speed: int = HEAD_TURN_SPEED) -> str:
+        """Tourne la tête dans une direction horizontale (gauche/droite)."""
+        key = normalize(direction)
+        if key in ("gauche", "left", "turn_left"):
+            self._look_yaw(HEAD_LEFT_YAW, speed)
+            return "left"
+        if key in ("droite", "right", "turn_right"):
+            self._look_yaw(HEAD_RIGHT_YAW, speed)
+            return "right"
+        if key in ("centre", "center", "face", "devant"):
+            self._look_yaw(0, speed)
+            return "center"
+        raise ActionError("direction de tête : left, right ou center")
+
+    def turn_head_left(self, steps: int = 1, speed: int = HEAD_TURN_SPEED) -> str:
+        """Tourne la tête à GAUCHE (yaw positif, convention PiDog).
+
+        :param steps: conservé pour compatibilité (ignoré)
+        :param speed: vitesse de déplacement (10-45)
+        """
+        self._look_yaw(HEAD_LEFT_YAW, speed)
+        return "turn_head_left"
+
+    def turn_head_right(self, steps: int = 1, speed: int = HEAD_TURN_SPEED) -> str:
+        """Tourne la tête à DROITE (yaw négatif, convention PiDog).
+
+        :param steps: conservé pour compatibilité (ignoré)
+        :param speed: vitesse de déplacement (10-45)
+        """
+        self._look_yaw(HEAD_RIGHT_YAW, speed)
+        return "turn_head_right"
+
+    def head_center(self, speed: int = HEAD_TURN_SPEED) -> str:
+        """Remet la tête bien droite dans l'axe."""
+        self._look_yaw(0, speed)
+        return "center"
+
+    def groove(self, times: int = 1) -> str:
+        """Mouvement de danse léger : petite inclinaison + wag de queue.
+        
+        :param times: nombre de cycles (1-3)
+        """
+        times = max(1, min(3, int(times)))
+        self._guard_power("dancer")
+        with self._lock:
+            self.posture("stand")
+            for _ in range(times):
+                # Incline la tête
+                self._head([[0, 0, -20]], speed=35)
+                # Wag la queue doucement
+                self._tail([[30]], speed=45)
+                self._tail([[-30]], speed=45)
+                # Reviens au centre
+                self._tail([[0]], speed=50)
+        return "groove"
 
     def celebrate(self) -> str:
         with self._lock:
@@ -795,6 +931,12 @@ class RobotActions:
             "rest": self.rest,
             "head": self.head,
             "head_gesture": self.head_gesture,
+            "head_center": self.head_center,
+            "look": self.look,
+            "turn_head_left": self.turn_head_left,
+            "turn_head_right": self.turn_head_right,
+            "bow": self.bow,
+            "groove": self.groove,
             "tail": self.tail,
             "wag": self.wag,
             "led": self.led,

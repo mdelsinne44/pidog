@@ -381,26 +381,35 @@ def _trim_history(history, max_messages: int = 12, max_chars: int = 6000):
 def _tool_content(result: dict, budget: int = MAX_TOOL_CHARS) -> str:
     """Sérialise un résultat d'outil dans le budget TPM (≈300 tokens).
 
-    On réduit d'abord les plus grosses chaînes (logs, sorties shell) pour
-    garder un JSON valide et les champs structurés (ok, temp_c, count…).
+    On réduit d'abord les plus grosses valeurs (chaînes, puis listes/dicts)
+    pour garder un JSON valide et les champs structurés (ok, temp_c, count…).
     """
-    blob = json.dumps(result, ensure_ascii=False)
+    def dump(value) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    blob = dump(result)
     if len(blob) <= budget:
         return blob
     slim = dict(result)
-    for _ in range(8):
-        key = max((k for k, v in slim.items() if isinstance(v, str)),
-                  key=lambda k: len(slim[k]), default=None)
-        if key is None:
-            break
-        blob = json.dumps(slim, ensure_ascii=False)
+    for _ in range(12):
+        blob = dump(slim)
         if len(blob) <= budget:
             return blob
-        overflow = len(blob) - budget + 40
-        text = slim[key]
-        keep = max(80, len(text) - overflow)
-        slim[key] = text[:keep] + f"… (+{len(text) - keep} car.)"
-    return json.dumps(slim, ensure_ascii=False)[:budget]
+        key = max(slim, key=lambda k: len(dump(slim[k])), default=None)
+        if key is None:
+            break
+        value = slim[key]
+        if isinstance(value, str):
+            overflow = len(blob) - budget + 40
+            keep = max(80, len(value) - overflow)
+            slim[key] = value[:keep] + f"… (+{len(value) - keep} car.)"
+        elif isinstance(value, list) and value:
+            slim[key] = value[:-1] or "…"
+        elif isinstance(value, dict):
+            slim[key] = dump(value)[:160] + "…"
+        else:
+            slim[key] = "…"
+    return dump(slim)[:budget]
 
 
 def _summarize_result(result: dict) -> str:
@@ -533,6 +542,8 @@ Commandes de session :
   /state              état robot + services
   /actions            catalogue d'actions physiques
   /mem <texte>        recherche mémoire (retrieval scoré)
+  /web <requête>      recherche Internet (DuckDuckGo)
+  /run <code python>  exécute un script Python dans ~/pidog
   /remember k = v     ajoute un fait durable
   /forget <clé>       désactive une entrée
   /stats              stats mémoire + modèle courant
@@ -566,6 +577,12 @@ def handle_command(line: str, history, state: dict) -> bool:
         for row in rows:
             print(f"  {row['key']:22} {row['value']}  "
                   f"[{str(row['updated_at'])[:16]}]")
+    elif cmd == "web":
+        print(json.dumps(tools.execute_tool("web_search", {"query": arg}),
+                         ensure_ascii=False, indent=2))
+    elif cmd in ("run", "python", "py"):
+        print(json.dumps(tools.execute_tool("run_python", {"code": arg}),
+                         ensure_ascii=False, indent=2))
     elif cmd in ("remember", "add"):
         key, _, value = arg.partition("=")
         if not value:
@@ -629,7 +646,7 @@ def main(argv=None) -> int:
     print(f"  robot  : {robot}")
     print(f"  mémoire: {stats['active']} faits actifs — {stats['db']}")
     print(f"  outils : {len(tools.TOOLS)} "
-          "(robot, mémoire, systemd, logs, shell lecture seule)")
+          "(robot, mémoire, systemd, shell, code Python, Internet)")
     print("  /help pour les commandes, Ctrl+D pour quitter.\n")
 
     history: list[dict] = []
