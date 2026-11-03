@@ -47,6 +47,18 @@ import time
 from collections import deque
 from typing import Optional
 
+# BASE + .env AVANT les imports locaux : memory.py lit os.environ au moment de
+# l'import (PIDOG_MEMORY_DB, PIDOG_DATA_DIR…). Chargé plus bas, un réglage
+# posé dans .env serait ignoré par la voix mais honoré par le CLI — écart
+# silencieux entre les deux canaux.
+BASE = os.path.dirname(os.path.abspath(__file__))
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(BASE), ".env"))  # racine de l'extension
+    load_dotenv(os.path.join(BASE, ".env"))  # éventuel .local dans voice/
+except Exception:
+    pass
+
 import env_vision
 import memory
 import stt
@@ -58,14 +70,6 @@ import requests
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 SetLogLevel(-1)  # Vosk silencieux (on a nos propres logs)
-
-BASE = os.path.dirname(os.path.abspath(__file__))
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(BASE), ".env"))  # racine de l'extension
-    load_dotenv(os.path.join(BASE, ".env"))  # éventuel .local dans voice/
-except Exception:
-    pass
 
 import atexit
 import signal
