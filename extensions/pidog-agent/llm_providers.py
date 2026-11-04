@@ -68,9 +68,10 @@ DEFAULT_GEMINI_MODELS = "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-4-argon"
 # `openrouter/free` sert de dernier recours (il choisit lui-même un gratuit).
 DEFAULT_OPENROUTER_MODELS = (
     "deepseek/deepseek-v4.1-flash-1017",
-    "recursive/flint-v1.0:free",
     "cohere/north-mini-code:free",
-    "openrouter/free"
+    "openrouter/free",
+    # Mesuré à 15 s avec outils : dernier recours seulement.
+    "recursive/flint-v1.0:free",
 )
 # ALLaM est servi par Groq mais possède son propre quota (les limites Groq sont
 # par modèle). C'est un 7B : filet de sécurité, pas un remplaçant de Qwen.
