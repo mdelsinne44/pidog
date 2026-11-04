@@ -136,14 +136,15 @@ def _budget(messages) -> str:
 
 
 def llm_stream(messages, model=None, tools_enabled=True):
-    """Événements normalisés, avec bascule Groq → Gemini → OpenRouter free.
+    """Événements normalisés, routés pour la tâche « agent ».
 
     ``model`` peut forcer un fournisseur : ``gemini/gemini-3.5-flash-lite``,
     ``openrouter/…`` ou ``groq/qwen/qwen3.8-27b``.
     """
     debug_log("LLM_REQUEST", f"prefix={_PREFIX_SHA} {_budget(messages)}")
-    debug_log("LLM_CHAIN", " → ".join(t.label for t in llm.chain(model)))
-    yield from llm.stream(messages, model=model,
+    debug_log("LLM_CHAIN",
+              " → ".join(t.label for t in llm.chain(model, task="agent")))
+    yield from llm.stream(messages, model=model, task="agent",
                           tools=tools.TOOLS if tools_enabled else None,
                           max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
 
@@ -274,6 +275,7 @@ def run_turn(user_text, history, model=None, stream=True):
             # Repli non-streaming : même politique de bascule entre providers.
             debug_log("LLM_REQUEST", f"prefix={_PREFIX_SHA} {_budget(messages)} (no-stream)")
             data, error = llm.complete(messages, model=model or MODEL,
+                                       task="agent",
                                        tools=tools.TOOLS,
                                        max_tokens=MAX_TOKENS,
                                        temperature=TEMPERATURE)

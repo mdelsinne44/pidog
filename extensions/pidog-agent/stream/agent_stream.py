@@ -797,7 +797,7 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
     ici aussi : si Groq sature son TPM, la voix ne meurt pas, elle bascule.
     """
     global last_activity
-    if not any(t.available() for t in llm.chain(LLM_MODEL)):
+    if not any(t.available() for t in llm.chain(LLM_MODEL, task="voice")):
         await say("Je n'ai pas de clé LLM configurée.")
         return
     loop = asyncio.get_running_loop()
@@ -919,7 +919,7 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
                 calls: list = []
                 round_text: list = []
                 generator = llm.stream(
-                    messages, model=LLM_MODEL,
+                    messages, model=LLM_MODEL, task="voice",
                     tools=VOICE_TOOLS if VOICE_TOOLS else None,
                     max_tokens=180, temperature=0.3)
                 started = time.time()
@@ -1491,7 +1491,8 @@ async def main():
 
     print("=" * 58, flush=True)
     print("PiDog ASSISTANT STREAMING", flush=True)
-    _chain = [t.label for t in llm.chain(LLM_MODEL) if t.available()]
+    _chain = [t.label for t in llm.chain(LLM_MODEL, task="voice")
+              if t.available()]
     print(f"  LLM     : {' → '.join(_chain) if _chain else '(aucune clé)'}", flush=True)
     print(f"  STT     : {stt.describe()}  (wake word « PiDog » sur Vosk)", flush=True)
     print(f"  TTS     : Piper {os.path.basename(VOICE)}", flush=True)
