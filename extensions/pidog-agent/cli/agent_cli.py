@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -89,236 +90,66 @@ def debug_log(step: str, detail: str = "") -> None:
         print(_color(f"[debug] {line}", C_DIM), flush=True)
 
 
+def _log_usage(usage) -> None:
+    """Trace les tokens consommés et l'efficacité du cache du fournisseur."""
+    if not isinstance(usage, dict) or not usage:
+        return
+    prompt = int(usage.get("prompt_tokens") or 0)
+    cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    hit = f"{100 * cached / prompt:.0f} %" if prompt else "—"
+    debug_log("LLM_USAGE", f"in={prompt} cached={cached} ({hit}) out={completion}")
+
+
 # --------------------------------------------------------------------- LLM ---
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_KEY = os.getenv("GROQ_KEY", "")
-MODEL = os.getenv("LLM_MODEL_CLI") or os.getenv("LLM_MODEL") or "openai/gpt-oss-120b"
+import llm_providers as llm
+
+MODEL = os.getenv("LLM_MODEL_CLI") or os.getenv("LLM_MODEL") or llm.DEFAULT_GROQ_MODELS
 SYSTEM_PROMPT = cli_prompt()
 MAX_ROUNDS = 6
 # 800 tokens suffisent largement pour un tour de terminal, et chaque token de
-# complétion compte dans le quota TPM du tier gratuit (8 000/min).
+# complétion compte dans le quota TPM du tier gratuit (8 000/min chez Groq).
 MAX_TOKENS = int(os.getenv("PIDOG_MAX_TOKENS", "800"))
 # Un résultat d'outil est renvoyé au modèle : 1200 car. ≈ 300 tokens. Sans ce
 # plafond, `sys_info` ou `journalctl` font exploser le budget en un seul appel.
 MAX_TOOL_CHARS = int(os.getenv("PIDOG_MAX_TOOL_CHARS", "1200"))
 TEMPERATURE = 0.25
-# Repli automatique quand le modèle principal sature son quota TPM.
-FALLBACK_MODELS = [m.strip() for m in
-                   os.getenv("LLM_FALLBACKS", "openai/gpt-oss-20b").split(",")
-                   if m.strip()]
-RETRY_MAX = 2          # tentatives supplémentaires sur 429
-RETRY_MAX_WAIT = 35.0  # au-delà, on rend la main plutôt que de bloquer le shell
+RETRY_MAX = llm.RETRY_MAX
+RETRY_MAX_WAIT = llm.RETRY_MAX_WAIT
 
-_rate_limited_until = 0.0
-
-
-def _quota_wait(response=None) -> float:
-    """Déduit le délai d'un 429 (header ou corps JSON)."""
-    wait = 20.0
-    if response is not None:
-        for header in ("retry-after", "x-ratelimit-reset-requests",
-                       "x-ratelimit-reset-tokens"):
-            raw = response.headers.get(header)
-            if not raw:
-                continue
-            try:
-                wait = max(1.0, float(str(raw).rstrip("s")))
-                break
-            except Exception:
-                pass
-        try:
-            message = response.json().get("error", {}).get("message", "")
-            match = re.search(r"try again in ([\d.]+)\s*(ms|s|m)", message, re.I)
-            if match:
-                value, unit = float(match.group(1)), match.group(2).lower()
-                wait = (value / 1000 if unit == "ms"
-                        else value * 60 if unit == "m" else value)
-        except Exception:
-            pass
-    return max(1.0, min(90.0, wait))
+# Empreinte du préfixe stable (prompt système + schémas d'outils). Groq, Gemini
+# et OpenRouter cachent automatiquement un préfixe **identique** : si cette
+# empreinte change d'un tour à l'autre, le cache ne peut pas mordre. Elle est
+# loguée en debug pour vérifier, et le préfixe doit rester en tête de requête.
+_PREFIX_SHA = hashlib.sha256(
+    (SYSTEM_PROMPT + json.dumps(tools.TOOLS, sort_keys=True,
+                                ensure_ascii=False)).encode()
+).hexdigest()[:12]
 
 
-def _post(payload, stream: bool):
-    return requests.post(
-        GROQ_URL,
-        headers={"Authorization": f"Bearer {GROQ_KEY}",
-                 "Content-Type": "application/json"},
-        json=payload,
-        stream=stream,
-        timeout=(10, 120),
-    )
+def _budget(messages) -> str:
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    tools_chars = len(json.dumps(tools.TOOLS, ensure_ascii=False))
+    return (f"messages={len(messages)} chars={chars} "
+            f"tools={len(tools.TOOLS)}={tools_chars} car "
+            f"≈ {(chars + tools_chars) // 4} tokens")
 
 
-def _model_chain(model=None) -> list[str]:
-    """Modèle demandé, puis replis (dédoublonnés, ordre conservé)."""
-    chain: list[str] = []
-    for candidate in [model or MODEL, *FALLBACK_MODELS]:
-        if candidate and candidate not in chain:
-            chain.append(candidate)
-    return chain
+def llm_stream(messages, model=None, tools_enabled=True):
+    """Événements normalisés, avec bascule Groq → Gemini → OpenRouter free.
 
-
-def _post_with_retry(payload):
-    """POST non-streamé avec la même politique 429 que ``groq_stream``.
-
-    Retourne ``(data, erreur)`` ; ``data`` vaut ``None`` en cas d'échec.
+    ``model`` peut forcer un fournisseur : ``gemini/gemini-3.5-flash-lite``,
+    ``openrouter/…`` ou ``groq/qwen/qwen3.8-27b``.
     """
-    chain = _model_chain(payload.get("model"))
-    retries = 0
-    while True:
-        payload["model"] = chain[0]
-        try:
-            response = _post(payload, stream=False)
-        except Exception as exc:
-            return None, f"réseau : {type(exc).__name__}: {exc}"
-        if response.status_code == 200:
-            try:
-                return response.json(), None
-            except Exception as exc:
-                return None, f"réponse illisible : {exc}"
-        if response.status_code != 429:
-            return None, f"Groq HTTP {response.status_code} : {response.text[:300]}"
-        wait = _quota_wait(response)
-        if wait <= RETRY_MAX_WAIT and retries < RETRY_MAX:
-            retries += 1
-            print(_color(f"[info] quota TPM atteint — nouvelle tentative dans "
-                         f"{int(wait)} s ({retries}/{RETRY_MAX})", C_YELLOW),
-                  flush=True)
-            time.sleep(wait)
-            continue
-        if len(chain) > 1:
-            dropped = chain.pop(0)
-            retries = 0
-            print(_color(f"[info] {dropped} saturé — bascule sur {chain[0]}",
-                         C_YELLOW), flush=True)
-            continue
-        return None, f"quota Groq atteint (429) — réessaie dans {int(wait)} s"
+    debug_log("LLM_REQUEST", f"prefix={_PREFIX_SHA} {_budget(messages)}")
+    debug_log("LLM_CHAIN", " → ".join(t.label for t in llm.chain(model)))
+    yield from llm.stream(messages, model=model,
+                          tools=tools.TOOLS if tools_enabled else None,
+                          max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
 
 
-def _build_payload(messages, model, stream, tools_enabled=True):
-    """Construit le corps de requête (paramètres communs streaming/non-streaming).
-
-    ``reasoning_effort`` n'est envoyé qu'aux modèles gpt-oss : sur ce type de
-    modèle, le « reasoning » consomme le budget ``max_tokens`` et, sans ce
-    réglage, la réponse finale peut arriver **vide** (finish_reason=length
-    après ~800 tokens de réflexion). Constaté sur gpt-oss-120b le 03/11.
-    """
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE,
-        "stream": stream,
-    }
-    if str(model).startswith("openai/gpt-oss"):
-        payload["reasoning_effort"] = os.getenv("PIDOG_REASONING_EFFORT", "low")
-        payload["include_reasoning"] = False
-    if tools_enabled:
-        payload["tools"] = tools.TOOLS
-        payload["tool_choice"] = "auto"
-    return payload
-
-
-def groq_stream(messages, model=None, tools_enabled=True):
-    """Générateur d'événements normalisés.
-
-    Yields ``("text", str)``, ``("tool_calls", [{id,name,arguments}])``,
-    ``("info", str)`` ou ``("error", str)``.
-
-    Politique 429 : on attend le délai annoncé par Groq et on réessaie
-    (``RETRY_MAX`` fois) ; au-delà on change de modèle (replis plus légers) ;
-    en dernier recours on rend la main avec un cooldown global, plutôt que de
-    bloquer le shell indéfiniment.
-    """
-    global _rate_limited_until
-    if not GROQ_KEY:
-        yield ("error", "GROQ_KEY absente — renseigne extensions/pidog-agent/.env")
-        return
-    now = time.time()
-    if now < _rate_limited_until:
-        yield ("error", f"quota Groq en cooldown ({int(_rate_limited_until - now) + 1}s)")
-        return
-
-    chain = _model_chain(model)
-    response = None
-    retries = 0
-    while True:
-        payload = _build_payload(messages, chain[0], True, tools_enabled)
-
-        debug_log("LLM_REQUEST", f"model={payload['model']} "
-                                 f"messages={len(messages)} "
-                                 f"chars={sum(len(str(m.get('content') or '')) for m in messages)}")
-        try:
-            response = _post(payload, stream=True)
-        except Exception as exc:
-            yield ("error", f"réseau : {type(exc).__name__}: {exc}")
-            return
-
-        if response.status_code == 200:
-            break
-        if response.status_code != 429:
-            yield ("error", f"Groq HTTP {response.status_code} : {response.text[:300]}")
-            return
-
-        wait = _quota_wait(response)
-        try:
-            response.close()
-        except Exception:
-            pass
-        if wait <= RETRY_MAX_WAIT and retries < RETRY_MAX:
-            retries += 1
-            yield ("info", f"quota TPM atteint sur {chain[0]} — "
-                           f"nouvelle tentative dans {int(wait)} s "
-                           f"({retries}/{RETRY_MAX})")
-            time.sleep(wait)
-            continue
-        if len(chain) > 1:
-            dropped = chain.pop(0)
-            retries = 0
-            yield ("info", f"{dropped} saturé — bascule sur {chain[0]}")
-            continue
-        _rate_limited_until = time.time() + wait
-        yield ("error", f"quota Groq atteint (429) — réessaie dans {int(wait)} s")
-        return
-
-    calls: dict[int, dict] = {}
-    finish_reason = None
-    try:
-        for raw in response.iter_lines():
-            if not raw or not raw.startswith(b"data: "):
-                continue
-            payload_raw = raw[6:]
-            if payload_raw == b"[DONE]":
-                break
-            try:
-                chunk = json.loads(payload_raw)
-                choice = chunk["choices"][0]
-                delta = choice["delta"]
-            except Exception:
-                continue
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-            content = delta.get("content")
-            if content:
-                yield ("text", content)
-            for call in delta.get("tool_calls") or []:
-                index = call.get("index", 0)
-                slot = calls.setdefault(index, {"id": "", "name": "",
-                                                "arguments": ""})
-                if call.get("id"):
-                    slot["id"] = call["id"]
-                function = call.get("function") or {}
-                if function.get("name"):
-                    slot["name"] += function["name"]
-                if function.get("arguments"):
-                    slot["arguments"] += function["arguments"]
-    except Exception as exc:
-        yield ("error", f"flux interrompu : {type(exc).__name__}: {exc}")
-        return
-
-    if calls:
-        yield ("tool_calls", [calls[i] for i in sorted(calls)])
-    yield ("finish", finish_reason)
+# Nom conservé pour les imports existants (tests, scripts externes).
+groq_stream = llm_stream
 
 
 # ---------------------------------------------------------------- contexte ---
@@ -440,9 +271,12 @@ def run_turn(user_text, history, model=None, stream=True):
         text = []
         finish_reason = None
         if not stream:
-            # Repli non-streaming : même politique de quota, réponse d'un bloc.
-            payload = _build_payload(messages, model or MODEL, False)
-            data, error = _post_with_retry(payload)
+            # Repli non-streaming : même politique de bascule entre providers.
+            debug_log("LLM_REQUEST", f"prefix={_PREFIX_SHA} {_budget(messages)} (no-stream)")
+            data, error = llm.complete(messages, model=model or MODEL,
+                                       tools=tools.TOOLS,
+                                       max_tokens=MAX_TOKENS,
+                                       temperature=TEMPERATURE)
             if error:
                 print(_color(f"[erreur] {error}", C_RED))
                 return
@@ -471,6 +305,8 @@ def run_turn(user_text, history, model=None, stream=True):
                     calls = payload
                 elif kind == "finish":
                     finish_reason = payload
+                elif kind == "usage":
+                    _log_usage(payload)
                 elif kind == "info":
                     sys.stdout.write("\n")
                     print(_color(f"[info] {payload}", C_YELLOW), flush=True)
@@ -594,8 +430,21 @@ def handle_command(line: str, history, state: dict) -> bool:
         print(f"{memory.memory_forget(arg)} entrée(s) désactivée(s).")
     elif cmd == "stats":
         print(json.dumps(memory.memory_stats(), ensure_ascii=False, indent=2))
+        cache = llm.cache_stats()
         print(f"modèle : {state['model']}  |  outils : {len(tools.TOOLS)}  |  "
               f"historique : {len(history)} messages")
+        print(f"llm    : {cache['calls']} appels, "
+              f"{cache['prompt_tokens']} tok entrée, "
+              f"{cache['completion_tokens']} tok sortie, "
+              f"cache {cache['cache_hit_pct']} % "
+              f"({cache['cached_tokens']} tok), "
+              f"{cache['fallbacks']} bascules")
+        for label, row in cache["by_target"].items():
+            hit = (f"{100 * row['cached'] / row['prompt']:.0f} %"
+                   if row["prompt"] else "—")
+            print(f"  {label:38} {row['calls']:>3} appels  "
+                  f"{row['prompt']:>7} tok  cache {hit}")
+        print("chaîne : " + " → ".join(t.label for t in llm.chain(state['model'])))
     elif cmd == "model":
         if arg:
             state["model"] = arg
@@ -623,7 +472,9 @@ def parse_args(argv):
     parser.add_argument("--debug", "-d", action="store_true",
                         help="trace LLM + outils dans debug_trace.log")
     parser.add_argument("--model", "-m", default=None,
-                        help="modèle Groq (défaut : LLM_MODEL_CLI)")
+                        help="modèle de départ (défaut : LLM_MODEL_CLI). "
+                             "Préfixe possible : gemini/…, allam/…, "
+                             "openrouter/… pour forcer un fournisseur")
     parser.add_argument("--no-stream", action="store_true",
                         help="réponse non streamée (diagnostic)")
     args, _unknown = parser.parse_known_args(argv)
@@ -643,6 +494,8 @@ def main(argv=None) -> int:
     stats = memory.memory_stats()
     print(_color("PiDog CLI — agent de dev", C_CYAN))
     print(f"  modèle : {state['model']}")
+    chain = [t.label for t in llm.chain(state["model"]) if t.available()]
+    print(f"  chaîne : {' → '.join(chain) if chain else '— (aucune clé)'}")
     print(f"  robot  : {robot}")
     print(f"  mémoire: {stats['active']} faits actifs — {stats['db']}")
     print(f"  outils : {len(tools.TOOLS)} "

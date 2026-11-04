@@ -60,8 +60,10 @@ except Exception:
     pass
 
 import env_vision
+import llm_providers as llm
 import memory
 import stt
+import tools
 from action_runner import execute_action_block, extract_action_code
 
 memory.memory_init()
@@ -148,6 +150,20 @@ GROQ_KEY = os.getenv("GROQ_KEY", "")
 LLM_MODEL = (os.getenv("LLM_MODEL_VOICE") or os.getenv("LLM_MODEL")
              or "qwen/qwen3.8-27b")
 CITY = os.getenv("PIDOG_CITY", "Nantes")
+
+# Outils accessibles à la VOIX : lecture seule uniquement (jamais shell,
+# write_file ni service_ctl — une erreur de transcription ne doit pas pouvoir
+# arrêter un service). Un seul aller-retour suffit pour répondre à l'oral.
+VOICE_TOOL_NAMES = {name.strip() for name in os.getenv(
+    "PIDOG_VOICE_TOOLS",
+    "robot_state,memory_search,sys_info,sys_services,weather,self_info",
+).split(",") if name.strip()}
+VOICE_TOOLS = [t for t in tools.TOOLS
+               if t["function"]["name"] in VOICE_TOOL_NAMES]
+VOICE_MAX_TOOL_ROUNDS = int(os.getenv("PIDOG_VOICE_TOOL_ROUNDS", "2"))
+VOICE_TOOL_RESULT_CHARS = int(os.getenv("PIDOG_VOICE_TOOL_CHARS", "700"))
+VOICE_STREAM_MAX_SEC = float(os.getenv("PIDOG_VOICE_STREAM_SEC", "25"))
+VOICE_HISTORY_CHARS = int(os.getenv("PIDOG_VOICE_HISTORY_CHARS", "3000"))
 
 PIPER_BIN = os.getenv("PIPER_BIN", "/home/mdelsinne/.local/bin/piper")
 VOICE = os.getenv("VOICE", os.path.join(BASE, "fr_FR-glados-medium.onnx"))
@@ -237,6 +253,29 @@ EMOTION_STYLE = {
 tts_queue: "asyncio.Queue[str]" = asyncio.Queue(maxsize=20)
 audio_queue: "asyncio.Queue[str]" = asyncio.Queue(maxsize=20)
 history = deque(maxlen=16)                              # contexte de discussion
+
+
+def _trim_history() -> None:
+    """Borne l'historique en caractères, pas seulement en nombre de messages.
+
+    Seize messages suffisent à dépasser 3 000 caractères (~800 tokens) et à
+    peser sur chaque tour : on jette les plus anciens au-delà du budget.
+    """
+    total = sum(len(str(m.get("content") or "")) for m in history)
+    while len(history) > 2 and total > VOICE_HISTORY_CHARS:
+        dropped = history.popleft()
+        total -= len(str(dropped.get("content") or ""))
+
+
+def _voice_tool(name: str, arguments) -> dict:
+    """Exécute un outil autorisé à l'oral (lecture seule) et renvoie un dict."""
+    if name not in VOICE_TOOL_NAMES:
+        return {"ok": False,
+                "error": f"outil non autorisé à l'oral : {name}"}
+    try:
+        return tools.execute_tool(name, arguments)
+    except Exception as exc:                     # jamais d'exception jusqu'au TTS
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 last_activity = time.time()
 
@@ -752,10 +791,14 @@ async def weather_reply(text: str) -> str:
 
 
 async def llm_stream_reply(user_text: str, action_intent: bool = False):
-    """Groq en streaming : chaque phrase part immédiatement dans le TTS."""
+    """Streaming LLM : chaque phrase part immédiatement dans le TTS.
+
+    La chaîne Groq → Gemini → ALLaM → OpenRouter de ``llm_providers`` s'applique
+    ici aussi : si Groq sature son TPM, la voix ne meurt pas, elle bascule.
+    """
     global last_activity
-    if not GROQ_KEY:
-        await say("Je n'ai pas de clé Groq configurée.")
+    if not any(t.available() for t in llm.chain(LLM_MODEL)):
+        await say("Je n'ai pas de clé LLM configurée.")
         return
     loop = asyncio.get_running_loop()
     import datetime
@@ -766,10 +809,11 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
     # lignes : moins de tokens par tour, et le bon souvenir au bon moment.
     mem_text = memory.memory_context(user_text, k=5, max_chars=700)
     history.append({"role": "user", "content": user_text})
+    _trim_history()
     env_summary = env_vision.env_summary()
     env_text = "; ".join(f"{k}:{v}" for k, v in env_summary.items())
     mood_hint = (
-        f"\n[CONTEXTE] {now.strftime('%Y-%m-%d %H:%M')} — aujourd'hui {today}, "
+        f"[CONTEXTE] {now.strftime('%Y-%m-%d %H:%M')} — aujourd'hui {today}, "
         f"demain {tomorrow}. Dernière humeur : {CURRENT_EMOTION}.\n"
         f"[MÉMOIRE PERTINENTE]\n{mem_text}\n"
         f"[ENVIRONNEMENT] {env_text}\n"
@@ -781,7 +825,11 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
             "(guirlandes = LED, patte = lift_paw, queue = wag, etc.) et inclus "
             "un bloc <<<CODE>>> avec dog.action(...)."
         )
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + mood_hint},
+    # Le prompt système reste SEUL en tête (préfixe identique à chaque tour :
+    # c'est lui que les fournisseurs mettent en cache). Tout ce qui bouge
+    # (heure, mémoire, environnement) vient dans un second message système.
+    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": mood_hint},
                 *history]
     spoken: list[str] = []
     raw_all = ""
@@ -867,61 +915,66 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
                 consume_text()
 
         try:
-            r = None
-            quota_hit = False
-            for attempt in range(2):
-                r = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                    json={"model": LLM_MODEL, "messages": messages,
-                          "max_tokens": 180, "temperature": 0.3, "stream": True},
-                    stream=True, timeout=30)
-                if r.status_code != 429:
-                    break
-                # Quota TPM : une seule reprise si l'attente est courte.
-                # Sinon on le dit clairement (avant : « Je n'ai pas compris »,
-                # ce qui masquait la vraie cause).
+            for _round in range(max(1, VOICE_MAX_TOOL_ROUNDS)):
+                calls: list = []
+                round_text: list = []
+                generator = llm.stream(
+                    messages, model=LLM_MODEL,
+                    tools=VOICE_TOOLS if VOICE_TOOLS else None,
+                    max_tokens=180, temperature=0.3)
+                started = time.time()
                 try:
-                    msg = r.json().get("error", {}).get("message", "")
-                except Exception:
-                    msg = ""
-                match = re.search(r"try again in ([\d.]+)\s*(ms|s)", msg)
-                wait = 3.0
-                if match:
-                    wait = float(match.group(1))
-                    wait = wait / 1000 if match.group(2) == "ms" else wait
-                print(f"LLM 429 (quota) — attente {wait:.1f}s", flush=True)
-                if attempt == 0 and wait <= 6:
-                    time.sleep(wait)
-                    continue
-                quota_hit = True
-                break
-            if quota_hit:
-                loop.call_soon_threadsafe(
-                    tts_queue.put_nowait,
-                    "Je sature mon quota de parole, réessaie dans une minute.")
-                return
-            if r.status_code != 200:
-                print(f"LLM HTTP {r.status_code}: {r.text[:150]}", flush=True)
-                loop.call_soon_threadsafe(tts_queue.put_nowait,
-                                          "Je n'ai pas compris.")
-                return
-            stream_start = time.time()
-            for raw in r.iter_lines():
-                if time.time() - stream_start > 30:
-                    print("LLM stream timeout (30s) — coupure", flush=True)
+                    for kind, payload in generator:
+                        if kind == "text":
+                            round_text.append(payload)
+                            feed(payload)
+                        elif kind == "tool_calls":
+                            calls = payload
+                        elif kind == "info":
+                            # Bascule de fournisseur (quota Groq, clé refusée…).
+                            print(f"LLM: {payload}", flush=True)
+                        elif kind == "usage":
+                            print(f"LLM usage: {payload}", flush=True)
+                        elif kind == "error":
+                            print(f"LLM: {payload}", flush=True)
+                            loop.call_soon_threadsafe(
+                                tts_queue.put_nowait,
+                                "Je sature mon quota de parole, réessaie dans "
+                                "une minute." if "quota" in payload
+                                else "Je n'ai pas compris.")
+                            return
+                        if time.time() - started > VOICE_STREAM_MAX_SEC:
+                            print(f"LLM: flux coupé après "
+                                  f"{VOICE_STREAM_MAX_SEC:.0f} s", flush=True)
+                            break
+                finally:
+                    closer = getattr(generator, "close", None)
+                    if closer:
+                        closer()
+                if not calls:
                     break
-                if not raw or not raw.startswith(b"data: "):
-                    continue
-                payload = raw[6:]
-                if payload == b"[DONE]":
-                    break
-                try:
-                    delta = (json.loads(payload)["choices"][0]["delta"]
-                             .get("content") or "")
-                except Exception:
-                    continue
-                feed(delta)
+
+                # Aller-retour d'outil : on rejoue le résultat au modèle, qui
+                # répond enfin à l'oral. Outils de lecture uniquement.
+                messages.append({
+                    "role": "assistant",
+                    "content": "".join(round_text) or None,
+                    "tool_calls": [{
+                        "id": call["id"] or f"call_{i}",
+                        "type": "function",
+                        "function": {"name": call["name"],
+                                     "arguments": call["arguments"] or "{}"},
+                    } for i, call in enumerate(calls)],
+                })
+                for i, call in enumerate(calls):
+                    result = _voice_tool(call["name"], call["arguments"])
+                    summary = json.dumps(result, ensure_ascii=False)
+                    print(f"  [TOOL] {call['name']} → {summary[:140]}", flush=True)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"] or f"call_{i}",
+                        "content": summary[:VOICE_TOOL_RESULT_CHARS],
+                    })
         except Exception as e:
             print("LLM:", e, flush=True)
             loop.call_soon_threadsafe(tts_queue.put_nowait,
@@ -957,7 +1010,7 @@ async def llm_stream_reply(user_text: str, action_intent: bool = False):
             execute_action_block, code, _action_debug)
         print(f"  [ACTION] {'OK' if ok else 'ÉCHEC'} — {detail}", flush=True)
     if spoken:
-        history.append({"role": "agent",
+        history.append({"role": "assistant",
                         "content": " ".join(spoken)[:300]})
     last_activity = time.time()
 
@@ -1438,8 +1491,9 @@ async def main():
 
     print("=" * 58, flush=True)
     print("PiDog ASSISTANT STREAMING", flush=True)
-    print(f"  LLM     : Groq / {LLM_MODEL}" + ("" if GROQ_KEY else "  (PAS DE CLÉ)"), flush=True)
-    print(f"  STT     : Vosk streaming (wake word « PiDog »)", flush=True)
+    _chain = [t.label for t in llm.chain(LLM_MODEL) if t.available()]
+    print(f"  LLM     : {' → '.join(_chain) if _chain else '(aucune clé)'}", flush=True)
+    print(f"  STT     : {stt.describe()}  (wake word « PiDog » sur Vosk)", flush=True)
     print(f"  TTS     : Piper {os.path.basename(VOICE)}", flush=True)
     print(f"  Micro   : {source or 'défaut'}", flush=True)
     print("=" * 58, flush=True)

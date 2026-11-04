@@ -83,8 +83,8 @@ def _fn(name: str, description: str, properties: Dict[str, Any],
 TOOLS: List[Dict[str, Any]] = [
     _fn(
         "robot_action",
-        "Action physique du PiDog via le daemon (posture, tête, LED, queue, "
-        "patte, marche, sons, tension). Le daemon gère posture et batterie.",
+        "Action physique du PiDog via le daemon (posture et batterie gérées "
+        "par le daemon).",
         {
             "action": {"type": "string",
                        "description": "posture, head, head_gesture, "
@@ -96,17 +96,14 @@ TOOLS: List[Dict[str, Any]] = [
                                       "battery, stop, rest"},
             "params": {"type": "object", "additionalProperties": True,
                        "description": "ex. {\"name\":\"sit\"}, "
-                                      "{\"color\":\"rainbow\"}, "
-                                      "{\"direction\":\"forward\",\"steps\":1,"
-                                      "\"speed\":98}"},
+                                      "{\"direction\":\"forward\",\"steps\":1}"},
         },
         ["action"],
     ),
     _fn("robot_state",
-        "État du robot : daemon prêt, tension batterie, audio/réseau/Bluetooth.",
-        {}),
+        "Daemon prêt, tension batterie, audio, réseau, Bluetooth.", {}),
     _fn("robot_actions",
-        "Liste les actions physiques disponibles et leurs paramètres.", {}),
+        "Catalogue des actions physiques et de leurs paramètres.", {}),
     _fn("memory_search",
         "Cherche dans la mémoire persistante (profil, agenda, préférences, projets).",
         {"query": {"type": "string"}, "k": {"type": "integer"}}, ["query"]),
@@ -120,7 +117,7 @@ TOOLS: List[Dict[str, Any]] = [
     _fn("memory_forget", "Désactive une entrée mémoire obsolète ou fausse.",
         {"key": {"type": "string"}}, ["key"]),
     _fn("sys_info",
-        "Raspberry Pi : uptime, charge, RAM, disque, température, throttling.", {}),
+        "Uptime, charge, RAM, disque, température, throttling.", {}),
     _fn("sys_services",
         "État des services clés (pidog, stream, monitor, kodi, retropie…).", {}),
     _fn("sys_logs", "Dernières lignes du journal d'une unité systemd.",
@@ -128,8 +125,8 @@ TOOLS: List[Dict[str, Any]] = [
          "lines": {"type": "integer", "description": "défaut 30, max 200"}},
         ["unit"]),
     _fn("service_ctl",
-        "Démarre/arrête/redémarre un service whitelist — uniquement sur demande "
-        "explicite de Martin.",
+        "start/stop/restart/status d'un service whitelist — uniquement sur "
+        "demande explicite de Martin.",
         {"action": {"type": "string",
                     "enum": ["start", "stop", "restart", "status"]},
          "unit": {"type": "string"},
@@ -137,36 +134,33 @@ TOOLS: List[Dict[str, Any]] = [
                       "description": "true seulement si Martin l'a demandé"}},
         ["action", "unit"]),
     _fn("shell",
-        "Exécute une commande shell dans ~/pidog (pipes et && acceptés). "
-        "Mode workspace par défaut : commandes système destructrices refusées. "
-        "Utilise-la pour git, ls, cat, grep, systemctl status, journalctl…",
+        "Commande shell dans ~/pidog (pipes et && acceptés) : git, ls, grep, "
+        "systemctl status, journalctl… Destructif refusé en mode workspace.",
         {"cmd": {"type": "string",
-                 "description": "ligne de commande complète (ex. \"git status --short | head\")"},
+                 "description": "ligne complète, ex. \"git status --short | head\""},
          "cwd": {"type": "string", "description": "défaut ~/pidog"}},
         ["cmd"]),
     _fn("run_python",
-        "Écrit puis exécute un script Python (cwd = ~/pidog, timeout 30 s). "
-        "À utiliser pour calculer, tester une idée ou lancer un bout de code "
-        "du dépôt. Les imports locaux (pidog, memory, tools…) sont disponibles.",
+        "Écrit puis exécute un script Python (cwd ~/pidog, timeout 30 s). "
+        "Imports locaux (pidog, memory, tools) disponibles.",
         {"code": {"type": "string", "description": "code Python complet"},
          "timeout": {"type": "integer", "description": "secondes, 1..120 (défaut 30)"}},
         ["code"]),
     _fn("write_file",
-        "Crée ou remplace un fichier texte dans le dépôt (~/pidog). "
-        "Refusé hors du workspace et en mode readonly.",
-        {"path": {"type": "string", "description": "chemin relatif à ~/pidog ou absolu sous ~/pidog"},
+        "Crée ou remplace un fichier texte sous ~/pidog (refusé hors workspace).",
+        {"path": {"type": "string",
+                  "description": "relatif à ~/pidog ou absolu dessous"},
          "content": {"type": "string"},
          "mode": {"type": "string", "enum": ["overwrite", "append"]}},
         ["path", "content"]),
     _fn("web_search",
         "Recherche Internet (DuckDuckGo) : titres, URLs et extraits. "
-        "Enchaîne avec fetch_url pour lire une page.",
+        "Enchaîne avec fetch_url.",
         {"query": {"type": "string"},
-         "k": {"type": "integer", "description": "nombre de résultats, défaut 5, max 10"}},
+         "k": {"type": "integer", "description": "défaut 5, max 10"}},
         ["query"]),
     _fn("fetch_url",
-        "Télécharge une page http(s) et renvoie son texte (HTML converti). "
-        "Pour la météo préfère weather ; pour une page précise, colle son URL.",
+        "Texte d'une page http(s) (HTML converti). Météo → weather.",
         {"url": {"type": "string"},
          "max_chars": {"type": "integer", "description": "défaut 6000, max 20000"}},
         ["url"]),

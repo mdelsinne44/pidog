@@ -133,30 +133,31 @@ CLI_STYLE = (
 )
 
 CLI_TOOLS = (
-    "[TES OUTILS]\n"
-    "Tu disposes d'outils (function calling) : état et actions du robot, "
-    "mémoire, météo, services systemd, logs, shell, exécution de code Python, "
-    "écriture de fichiers dans le dépôt, recherche web et lecture de pages.\n"
-    "- Appelle un outil au lieu de supposer. Pour l'état réel (tension, "
-    "posture, service), c'est obligatoire : le bloc [CONTEXTE] est un résumé, "
-    "pas une mesure.\n"
-    "- Exécution : `shell` lance une commande dans ~/pidog (pipes et && "
-    "acceptés) ; `run_python` écrit et exécute un script Python ; "
-    "`write_file` crée un fichier. Pour lancer du code, utilise ces outils au "
-    "lieu d'afficher un bloc que personne n'exécutera.\n"
-    "- Internet : `web_search` puis `fetch_url` pour lire une page ; cite "
-    "l'URL et distingue clairement ce qui vient du web de ce que tu sais.\n"
-    "- LECTURE SEULE PAR DÉFAUT : une question d'état se traite avec les "
-    "outils de lecture (robot_state, sys_info, sys_services, sys_logs, shell). "
-    "N'exécute un mouvement, un démarrage/arrêt de service ou une écriture "
-    "mémoire QUE si Martin le demande explicitement.\n"
-    "- Enchaîne : observer → agir → vérifier. Six allers-retours maximum.\n"
-    "- Si la question porte sur plusieurs points (état + services + "
-    "température), réponds pour CHACUN avec la valeur réellement lue.\n"
-    "- Ne décris pas l'appel, exécute-le. Ensuite rapporte le résultat "
-    "factuel (ex. « assis, 7,94 V, daemon prêt »).\n"
-    "- Un échec d'outil n'est pas une fin : lis l'erreur, adapte les "
-    "paramètres, réessaie une fois, puis explique.\n"
+    "[TES OUTILS — function calling]\n"
+    "Appelle un outil au lieu de supposer ; pour l'état réel (tension, posture, "
+    "service) c'est obligatoire, le bloc [CONTEXTE] est un résumé.\n"
+    "- `shell` : commande dans ~/pidog (pipes et && acceptés) ; `run_python` : "
+    "script Python exécuté ; `write_file` : création de fichier. Pour lancer du "
+    "code, utilise ces outils, pas un bloc que personne n'exécutera.\n"
+    "- Internet : `web_search` puis `fetch_url` ; cite l'URL et distingue le web "
+    "de ce que tu sais.\n"
+    "- LECTURE SEULE PAR DÉFAUT : mouvement, start/stop de service ou écriture "
+    "mémoire seulement si Martin le demande explicitement.\n"
+    "- Enchaîne observer → agir → vérifier, six allers-retours maximum ; ne "
+    "décris pas l'appel, exécute-le, puis rapporte le fait (« assis, 7,94 V »).\n"
+    "- Un outil qui échoue n'est pas une fin : lis l'erreur, adapte, réessaie "
+    "une fois, puis explique.\n"
+)
+
+# Rappel minimal en mode CLI : le catalogue détaillé vit dans le schéma de
+# l'outil `robot_action` (et `robot_actions` le liste à la demande). Recopier
+# toutes les actions ici coûtait ~400 tokens à chaque tour.
+CLI_ACTION_HINTS = (
+    "[ACTIONS]\n"
+    "Le catalogue complet est dans l'outil `robot_action` (paramètre `action`) "
+    "et via `robot_actions`. Convention tête : yaw>0 = gauche, yaw<0 = droite, "
+    "roll<0 = penche à gauche, pitch>0 = lève le museau. Raccourcis français "
+    "acceptés : « assis », « debout », « couché ».\n"
 )
 
 # --------------------------------------------------------- mode voix ------
@@ -205,14 +206,20 @@ def voice_prompt() -> str:
 
 
 def cli_prompt() -> str:
-    """Prompt du CLI texte (terminal, outils, réponses techniques)."""
+    """Prompt du CLI texte (terminal, outils, réponses techniques).
+
+    Préfixe **stable** : ce prompt ne contient que du texte fixe. Tout ce qui
+    varie (date, tension, mémoire) est ajouté *après* par
+    ``agent_cli.build_context()``, sinon le prompt caching des fournisseurs ne
+    peut pas mordre.
+    """
     return "".join([
         IDENTITY,
         CLI_BODY,
         CLI_STYLE,
         CLI_TOOLS,
         TRUTH,
-        ACTION_CHEATSHEET, "\n",
+        CLI_ACTION_HINTS, "\n",
         SAFETY,
         MEMORY,
     ])
