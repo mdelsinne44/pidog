@@ -63,7 +63,7 @@ import requests
 
 # ------------------------------------------------------------------ constantes
 DEFAULT_GROQ_MODELS = "openai/gpt-oss-120b"
-DEFAULT_GEMINI_MODELS = "gemini-3.8-flash,gemini-4-argon,gemini-3.5-flash-lite"
+DEFAULT_GEMINI_MODELS = "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-4-argon"
 # Modèles gratuits d'OpenRouter qui savent appeler des outils ; le routeur
 # `openrouter/free` sert de dernier recours (il choisit lui-même un gratuit).
 DEFAULT_OPENROUTER_MODELS = (
