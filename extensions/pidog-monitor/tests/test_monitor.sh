@@ -88,6 +88,10 @@ if [ "$1" = "-t" ] && [ "$2" = "-f" ] && [ "$3" = "GENERAL.CONNECTION" ]; then
   echo "GENERAL.CONNECTION:Livebox-Test"
   exit 0
 fi
+if [ "$1" = "dev" ] && [ "$2" = "reapply" ]; then
+  echo connected > "$FAKE_STATE/wifi"   # simule un reapply qui rétablit le lien
+  exit 0
+fi
 exit 0
 EOS
 
@@ -144,6 +148,12 @@ EOS
 echo "sudo $*" >> "$CALLS"
 [ "${1:-}" = "-n" ] && shift
 exec "$@"
+EOS
+
+    cat > "$T/bin/reboot" <<'EOS'
+#!/bin/bash
+echo "reboot $*" >> "$CALLS"
+exit 0
 EOS
 
     cat > "$T/bin/vcgencmd" <<'EOS'
@@ -300,6 +310,16 @@ touch "$FAKE_STATE/rfkill_blocked"
 run_mon check
 check "rfkill_unblock tenté" "audit_action rfkill_unblock"
 check "rfkill list appelé" "grep -q 'rfkill list' '$CALLS'"
+teardown
+
+echo "9. wifi rétabli → repair_net enchaîne dans le même passage"
+setup
+echo disconnected > "$FAKE_STATE/wifi"
+echo ko > "$FAKE_STATE/ping"
+echo ko > "$FAKE_STATE/dns"
+MON_DRY_RUN=0 run_mon check
+check "wifi_reapply exécuté" "audit_action wifi_reapply"
+check "nm_restart via repair_net" "audit_action nm_restart"
 teardown
 
 echo

@@ -747,7 +747,11 @@ repair_pass() {
     [ "$REPAIR_ENABLED" = 1 ] || return 0
 
     if [ "$WIFI_OK" -eq 0 ] && command -v nmcli >/dev/null 2>&1; then
-        repair_wifi || REPAIR_FAILED=1
+        if repair_wifi; then
+            WIFI_OK=1          # sinon repair_net serait sauté à ce passage
+        else
+            REPAIR_FAILED=1
+        fi
     fi
     if { [ "$WAN_OK" -eq 0 ] || [ "$DNS_OK" -eq 0 ]; } && [ "$WIFI_OK" -eq 1 ]; then
         repair_net || REPAIR_FAILED=1
