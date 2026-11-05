@@ -1,22 +1,37 @@
 [Unit]
-Description=PiDog Monitor — diagnostic santé (boot + périodique)
+Description=PiDog Monitor — diagnostic santé + réparation graduée
 Documentation=file:///home/mdelsinne/pidog/extensions/pidog-monitor/README.md
-After=network-online.target
-Wants=network-online.target
+# PAS de After=/Wants=network-online.target : ce service diagnostique le
+# réseau, il doit donc tourner même (surtout) quand il est coupé. Avec
+# NetworkManager-wait-online, un boot sans Wi-Fi retardait le diagnostic de 30 s
+# et pouvait le faire dépendre d'un état qu'il est censé réparer.
 
 [Service]
 Type=oneshot
 User=mdelsinne
 Group=mdelsinne
 Environment=MON_BOOT_LOG=/home/mdelsinne/mon-boot.log
-Environment=MON_STATE_FILE=/tmp/pidog-monitor.state
+# État persistant : le budget d'essais et le compteur de reboots doivent
+# survivre à un redémarrage (créé par install.sh, inscriptible par mdelsinne).
+Environment=MON_STATE_DIR=/var/lib/pidog-monitor
+# Nécessaires pour pulseaudio --start / pactl depuis le service.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStart=/home/mdelsinne/pidog/extensions/pidog-monitor/monitor.sh check
-TimeoutStartSec=30
+# Réparations (NetworkManager/tailscaled) + IA + reboot : l'échelle complète
+# peut durer ~2 min ; le helper IA est borné à 70 s. 5 min de marge.
+TimeoutStartSec=420
+TimeoutStopSec=15
 Nice=10
+IOSchedulingClass=idle
 # PAS de Restart= ni de WatchdogSec= ici : sur un Type=oneshot ils provoquent
 # une boucle de redémarrage (567 démarrages en 20 h constatés le 02/11) et le
 # watchdog est de toute façon ignoré. La périodicité est assurée par
 # pidog-monitor.timer ; l'échec est visible via `systemctl --failed`.
+#
+# Ne PAS activer ce service au boot (pas de [Install] WantedBy=...) : le timer
+# le déclenche déjà à OnBootSec=2min. L'activer en plus provoquait DEUX
+# exécutions au démarrage.
 
 [Install]
-WantedBy=multi-user.target
+# Volontairement vide : seule l'unité .timer s'installe (install.sh).

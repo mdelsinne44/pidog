@@ -9,6 +9,12 @@ backups/*
 .env
 __pycache__/
 
+# Fichiers d'échange des éditeurs : un swap de .env contient des secrets
+# (`..env.swp` pour nano/vim sur `.env`).
+*.swp
+*.swo
+.*.swp
+
 # Logs de session CLI — jamais committés (traces perso + chemins locaux)
 extensions/pidog-agent/cli/*.log
 **/cli_conversation.log

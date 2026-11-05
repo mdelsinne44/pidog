@@ -2,12 +2,14 @@
 Description=PiDog Monitor — vérification périodique (15 min)
 
 [Timer]
+# Au démarrage : premier passage 2 min après le boot, puis toutes les 15 min.
 OnBootSec=2min
 OnUnitActiveSec=15min
 AccuracySec=30s
 RandomizedDelaySec=15s
-Persistent=true
 Unit=pidog-monitor.service
+# Pas de Persistent= : il ne s'applique qu'aux timers OnCalendar=. Ici il est
+# ignoré, et un « rattrapage » n'aurait aucun sens pour un diagnostic d'état.
 
 [Install]
 WantedBy=timers.target
