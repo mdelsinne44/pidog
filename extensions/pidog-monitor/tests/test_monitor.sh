@@ -44,11 +44,12 @@ setup() {
     echo Running   > "$FAKE_STATE/tailscale"
     echo ok        > "$FAKE_STATE/ping"
     echo ok        > "$FAKE_STATE/dns"
-    for unit in ssh lightdm NetworkManager x11vnc tailscaled; do
+    for unit in ssh NetworkManager tailscaled; do
         echo active > "$FAKE_STATE/services/$unit.service"
     done
     echo inactive > "$FAKE_STATE/services/pidog.service"
     echo inactive > "$FAKE_STATE/services/pidog-agent-stream.service"
+    echo active   > "$FAKE_STATE/services/pidog-stream.service"
 
     write_fakes
 }
@@ -226,7 +227,7 @@ check "wifi_reapply tenté" "audit_action wifi_reapply"
 check "nm_restart tenté (wifi bloqué)" "audit_action nm_restart"
 check "ssh_restart tenté" "audit_action ssh_restart"
 check "tailscale_restart tenté" "audit_action tailscale_restart"
-check "reboot tenté une fois" "[ \"$(audit_count reboot)\" -eq 1 ]"
+check "pas de reboot au 1er passage (garde-fou 2 constats)" "[ \"$(audit_count reboot)\" -eq 0 ]"
 check "JSON valide en mode json" "bash '$MON' json 2>/dev/null | python3 -m json.tool >/dev/null"
 check "jamais 'start pidog.service'" "! grep -qE 'systemctl start pidog\.service' '$CALLS'"
 check "jamais 'start pidog-agent-stream'" "! grep -qE 'systemctl start pidog-agent-stream' '$CALLS'"
@@ -234,7 +235,7 @@ check "jamais 'enable'" "! grep -q 'systemctl enable' '$CALLS'"
 teardown
 
 # ============================================================== test 3 ======
-echo "3. anti-boucle de reboot → un seul essai sur deux passages"
+echo "3. anti-boucle de reboot → jamais à la 1re détection, une seule fois sur 3 passages"
 setup
 echo disconnected > "$FAKE_STATE/wifi"
 echo ko           > "$FAKE_STATE/ping"
@@ -242,9 +243,12 @@ echo ko           > "$FAKE_STATE/dns"
 echo ko           > "$FAKE_STATE/ssh"
 echo Stopped      > "$FAKE_STATE/tailscale"
 run_mon check
+check "1er passage : aucun reboot (panne non encore confirmée)" "[ \"$(audit_count reboot)\" -eq 0 ]"
 run_mon check
-check "un seul reboot au total" "[ \"$(audit_count reboot)\" -eq 1 ]"
-check "2e passage : reboot refusé" "grep -q 'reboot refusé' '$T/boot.log'"
+check "2e passage : reboot (panne constatée 2×)" "[ \"$(audit_count reboot)\" -eq 1 ]"
+run_mon check
+check "3e passage : reboot refusé (intervalle 30 min)" "grep -q 'reboot refusé' '$T/boot.log'"
+check "au total un seul reboot" "[ \"$(audit_count reboot)\" -eq 1 ]"
 teardown
 
 # ============================================================== test 4 ======
@@ -320,6 +324,22 @@ echo ko > "$FAKE_STATE/dns"
 MON_DRY_RUN=0 run_mon check
 check "wifi_reapply exécuté" "audit_action wifi_reapply"
 check "nm_restart via repair_net" "audit_action nm_restart"
+teardown
+
+echo "10. wifi_provision (mode repair) → recrée le profil depuis SSID+clé"
+setup
+MON_WIFI_SSID=Livebox-Test MON_WIFI_PSK=secret \
+    MON_DRY_RUN=0 run_mon repair wifi_provision
+check "wifi_provision exécuté" "audit_action wifi_provision"
+check "nmcli device wifi connect appelé" "grep -q 'device wifi connect' '$CALLS'"
+check "SSID passé en argument" "grep -q 'Livebox-Test' '$CALLS'"
+teardown
+
+echo "11. wifi_provision sans SSID/PSK → refus explicite, rien exécuté"
+setup
+MON_DRY_RUN=0 run_mon repair wifi_provision
+check "refus tracé" "grep -q 'non renseignés' '$T/boot.log'"
+check "aucune commande nmcli connect lancée" "! grep -q 'device wifi connect' '$CALLS'"
 teardown
 
 echo

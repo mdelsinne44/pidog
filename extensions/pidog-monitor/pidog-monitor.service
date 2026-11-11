@@ -14,6 +14,10 @@ Environment=MON_BOOT_LOG=/home/mdelsinne/mon-boot.log
 # État persistant : le budget d'essais et le compteur de reboots doivent
 # survivre à un redémarrage (créé par install.sh, inscriptible par mdelsinne).
 Environment=MON_STATE_DIR=/var/lib/pidog-monitor
+# Config sensible optionnelle (MON_WIFI_SSID / MON_WIFI_PSK pour le repli
+# « provision ») : ~/.config/pidog/monitor.env, chmod 600. Le « - » rend le
+# fichier optionnel (absent = pas de repli).
+EnvironmentFile=-/home/mdelsinne/.config/pidog/monitor.env
 # Nécessaires pour pulseaudio --start / pactl depuis le service.
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native

@@ -44,6 +44,7 @@ from typing import List, Optional, Tuple
 ACTIONS = {
     "rfkill_unblock": "débloque le Wi-Fi coupé par rfkill (soft block)",
     "wifi_reapply": "réapplique la configuration Wi-Fi de wlan0 (DHCP/DNS)",
+    "wifi_provision": "recrée le profil Wi-Fi depuis SSID+clé (monitor.env) si le profil a disparu",
     "wifi_up": "réactive le profil Wi-Fi enregistré",
     "nm_restart": "redémarre NetworkManager (réseau/DNS bloqué)",
     "dns_restart": "redémarre systemd-resolved si présent",
@@ -257,7 +258,16 @@ def local_decision(prompt: str, actions: dict) -> Tuple[Optional[str], str, str]
     directory = os.path.expanduser(
         os.getenv("LLM_LOCAL_DIR", "~/models/llm-local"))
     gguf = sorted(glob.glob(os.path.join(directory, "*.gguf")))
+    # ~/.local/bin n'est PAS dans le PATH d'un shell non interactif (SSH,
+    # timer systemd) : on cherche le wrapper install-local-llm.sh en direct.
     cli = shutil.which(os.getenv("LLM_LOCAL_CLI", "llama-cli"))
+    if cli is None:
+        for candidate in ("~/.local/bin/llama-cli",
+                          "~/.local/lib/pidog-llama/llama-cli"):
+            candidate = os.path.expanduser(candidate)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                cli = candidate
+                break
     if gguf and cli:
         import tempfile
         handle = tempfile.NamedTemporaryFile(

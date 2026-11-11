@@ -19,9 +19,10 @@
 #   2. IA de dernier recours (monitor_ai.py) à whitelist fermée ;
 #   3. reboot, en dernier ressort, avec budget et garde-fous (jamais en boucle).
 #
-# Le monitor ne démarre JAMAIS pidog.service ni pidog-agent-stream.service :
-# il ne fait que constater leur état (`systemctl is-active`). La voix reste
-# lancée à la main / par son propre service, c'est un choix explicite.
+# Le monitor ne démarre JAMAIS pidog.service, pidog-agent-stream.service ni
+# pidog-stream.service : il ne fait que constater leur état
+# (`systemctl is-active`). La voix reste lancée à la main / par son propre
+# service, c'est un choix explicite.
 #
 # Piège évité : les contrôles sont appelés DANS le shell principal. Un
 # `while read < <(check_*)` les exécuterait dans un sous-shell et perdrait le
@@ -64,6 +65,10 @@ ACTION_TIMEOUT="${MON_ACTION_TIMEOUT:-20}"
 
 WIFI_DEV="${MON_WIFI_DEV:-wlan0}"
 WIFI_PROFILE="${MON_WIFI_PROFILE:-}"
+# Repli « provision » : recrée le profil Wi-Fi (SSID + clé) s'il a disparu de
+# NetworkManager. Renseigné via ~/.config/pidog/monitor.env (chmod 600).
+WIFI_SSID="${MON_WIFI_SSID:-}"
+WIFI_PSK="${MON_WIFI_PSK:-}"
 SSH_HOST="${MON_SSH_HOST:-127.0.0.1}"
 SSH_PORT="${MON_SSH_PORT:-22}"
 SSH_CHECK="${MON_SSH_CHECK:-banner}"
@@ -473,7 +478,7 @@ run_action() {           # $1 action, $2 source, $3 raison
     local -a cmd=()
 
     case "$action" in
-        rfkill_unblock|wifi_reapply|wifi_up|nm_restart|dns_restart|tailscale_restart|\
+        rfkill_unblock|wifi_reapply|wifi_provision|wifi_up|nm_restart|dns_restart|tailscale_restart|\
         tailscale_up|ssh_restart|bluetooth_restart|audio_restart|reboot|none) ;;
         *)
             emit "action REFUSÉE (hors whitelist) : $action"
@@ -521,6 +526,15 @@ run_action() {           # $1 action, $2 source, $3 raison
     case "$action" in
         rfkill_unblock)    cmd=(sudo -n rfkill unblock wifi) ;;
         wifi_reapply)      cmd=(nmcli dev reapply "$WIFI_DEV") ;;
+        wifi_provision)
+            if [ -z "$WIFI_SSID" ] || [ -z "$WIFI_PSK" ]; then
+                emit "wifi_provision impossible : MON_WIFI_SSID/MON_WIFI_PSK non renseignés"
+                audit wifi_provision 0 auto "config SSID/PSK absente (monitor.env)"
+                return 1
+            fi
+            # Recrée/active un profil depuis SSID + clé (monitor.env, chmod 600).
+            cmd=(nmcli -w 25 device wifi connect "$WIFI_SSID" password "$WIFI_PSK" ifname "$WIFI_DEV")
+            ;;
         wifi_up)           cmd=(nmcli -w 20 con up id "$WIFI_PROFILE") ;;
         nm_restart)        cmd=(sudo -n systemctl restart NetworkManager) ;;
         dns_restart)       cmd=(sudo -n systemctl restart systemd-resolved) ;;
@@ -572,6 +586,8 @@ repair_wifi() {
         run_action wifi_up auto "profil $WIFI_PROFILE"
         wait_ok verify_wifi 20 && return 0
     fi
+    run_action wifi_provision auto "création profil $WIFI_SSID (clé monitor.env)"
+    wait_ok verify_wifi 25 && return 0
     run_action nm_restart auto "wifi toujours KO"
     wait_ok verify_wifi 25 && return 0
     return 1
@@ -721,12 +737,12 @@ run_checks() {
     TS_OK=1
     HW_BAD=0
 
+    # Pi headless : pas de lightdm ni de x11vnc — inutile de les scruter.
+    # pidog-stream.service (vidéo) remplace l'ancien pidog-agent-stream.service.
     check_service ssh.service critical
-    check_service lightdm.service critical
     check_service NetworkManager.service critical
-    check_service x11vnc.service optional
     check_service tailscaled.service optional
-    check_service pidog-agent-stream.service optional
+    check_service pidog-stream.service optional
     check_service pidog.service expected-off
     check_hardware
     check_network
@@ -766,6 +782,16 @@ repair_pass() {
     return 0
 }
 
+# Le reboot exige que la panne soit DÉJÀ présente au passage précédent : une
+# première détection peut être transitoire — la réparation déterministe + l'IA
+# ont alors un cycle complet avant qu'on envisage de redémarrer.
+prev_ko() {               # $1 = motif signature «name=0»
+    case "$PREV" in
+        *"$1;"*) return 0 ;;
+        *)       return 1 ;;
+    esac
+}
+
 main() {
     # Mode manuel : une seule action, puis on rend la main.
     if [ "$MODE" = "repair" ]; then
@@ -786,6 +812,10 @@ main() {
         fi
     fi
 
+    # État du passage précédent : sert de contexte au reboot (pas de reboot à
+    # la première détection) et au choix « rapport complet ou silencieux ».
+    PREV=$(cat "$STATE_FILE" 2>/dev/null || true)
+
     run_checks
 
     if [ "$MODE" = "check" ]; then
@@ -796,12 +826,18 @@ main() {
             run_checks
         fi
         # Reboot en dernier ressort : seulement si la panne est LOCALE (wifi,
-        # passerelle ou SSH KO). Un WAN/DNS injoignable alors que le LAN répond
-        # est une panne FAI : redémarrer la Pi n'y changerait rien.
+        # passerelle ou SSH KO) ET déjà constatée au passage précédent — une
+        # première détection peut être transitoire, la réparation déterministe
+        # + l'IA ont un cycle complet avant d'envisager un redémarrage. Un
+        # WAN/DNS injoignable alors que le LAN répond est une panne FAI :
+        # redémarrer la Pi n'y changerait rien.
         if ai_needed && [ "$REBOOT_ENABLED" = 1 ] && [ "$REPAIR_ENABLED" = 1 ] \
            && { [ "$WIFI_OK" -eq 0 ] || [ "$LAN_OK" -eq 0 ] \
-                || [ "$SSH_OK" -eq 0 ]; }; then
-            run_action reboot auto "domaines critiques KO après réparations + IA" || true
+                || [ "$SSH_OK" -eq 0 ]; } \
+           && { { [ "$WIFI_OK" -eq 0 ] && prev_ko "reseau:wifi=0"; } \
+                || { [ "$LAN_OK" -eq 0 ] && prev_ko "reseau:lan=0"; } \
+                || { [ "$SSH_OK" -eq 0 ] && prev_ko "reseau:ssh=0"; }; }; then
+            run_action reboot auto "domaines critiques KO sur 2 passages après réparations + IA" || true
         fi
     fi
 
@@ -816,7 +852,6 @@ main() {
     if [ "$MODE" = "json" ]; then
         render_json
     else
-        PREV=$(cat "$STATE_FILE" 2>/dev/null || true)
         if [ "$MODE" = "report" ] || [ "$UPTIME_S" -lt "$BOOT_WINDOW" ] \
            || [ "$PREV" != "$SIGNATURE" ] || [ "$ACTIONS_DONE" -gt 0 ]; then
             render_checks

@@ -6,9 +6,9 @@ un périmètre fermé, budgété et vérifié.
 
 ## Ce qu'il ne fait pas (par choix)
 
-* il **ne démarre ni `pidog.service` ni `pidog-agent-stream.service`** — il ne
-  lit que leur état (`systemctl is-active`). La voix reste lancée à la main ou
-  par son propre service ;
+* il **ne démarre ni `pidog.service` ni `pidog-stream.service`** — il ne lit que
+  leur état (`systemctl is-active`). La voix reste lancée à la main ou par son
+  propre service ;
 * il **ne modifie aucun fichier de configuration** (`.env`, Netplan, SSH…) ;
 * il **n'exécute jamais de shell libre** : les actions sont une whitelist de
   verbes fixes, sans paramètre arbitraire (pas d'injection via un SSID ou un log) ;
@@ -41,8 +41,8 @@ monitor.sh repair reboot  # une action de la whitelist (debug)
 
 | Contrôle | Comment | Sévérité |
 |---|---|---|
-| `ssh`, `lightdm`, `NetworkManager` | `systemctl is-active` | critique |
-| `x11vnc`, `tailscaled`, `pidog-agent-stream` | `systemctl is-active` | informatif |
+| `ssh`, `NetworkManager` | `systemctl is-active` | critique |
+| `tailscaled`, `pidog-stream` (vidéo) | `systemctl is-active` | informatif |
 | `pidog.service` | état | informatif (« arrêté attendu ») |
 | `vcgencmd get_throttled` | bits 0-3 = maintenant (critique), bits 16-19 = historique | critique / info |
 | Température CPU | `/sys/class/thermal` | critique ≥ 80 °C |
@@ -72,7 +72,7 @@ Désactivable avec `MON_REPAIR=0`. Chaque action est suivie d'une **vérificatio
 
    | Domaine KO | Échelle |
    |---|---|
-   | Wi-Fi | `rfkill_unblock` (si soft-bloqué) → `wifi_reapply` → `wifi_up` (profil mémorisé) → `nm_restart` |
+   | Wi-Fi | `rfkill_unblock` (si soft-bloqué) → `wifi_reapply` → `wifi_up` (profil mémorisé) → `wifi_provision` (si `MON_WIFI_SSID`/`MON_WIFI_PSK` renseignés) → `nm_restart` |
    | WAN / DNS | `nm_restart` → `dns_restart` (si `systemd-resolved` existe) |
    | SSH | `ssh_restart` |
    | Tailscale | `tailscale_restart` → `tailscale_up` |
@@ -91,9 +91,12 @@ Désactivable avec `MON_REPAIR=0`. Chaque action est suivie d'une **vérificatio
    * quota : 1 appel / 30 min, 6 / 24 h.
 
 3. **Reboot en dernier ressort**, uniquement si la panne est **locale**
-   (Wi-Fi, passerelle ou SSH KO). Un WAN/DNS injoignable alors que la
-   passerelle répond est une panne FAI : on ne redémarre pas la Pi pour ça,
-   et un Tailscale seul ne suffit pas non plus. Conditions :
+   (Wi-Fi, passerelle ou SSH KO) **et déjà constatée au passage précédent**
+   (une première détection peut être transitoire : la réparation déterministe
+   + l'IA ont un cycle complet avant d'envisager un redémarrage). Un WAN/DNS
+   injoignable alors que la passerelle répond est une panne FAI : on ne
+   redémarre pas la Pi pour ça, et un Tailscale seul ne suffit pas non plus.
+   Conditions :
    * pas de sous-tension/throttling actif, pas de surchauffe ;
    * uptime ≥ 15 min (anti-boucle au démarrage) ;
    * ≥ 30 min depuis le dernier reboot, max 3 / 24 h.
@@ -190,6 +193,7 @@ tail -20 ~/mon-boot.log
 | `MON_REBOOT` | `1` | autorise le reboot de dernier recours |
 | `MON_STRICT` | `0` | sortie 2 si dégradé |
 | `MON_WIFI_DEV` / `MON_WIFI_PROFILE` | `wlan0` / mémorisé | cible Wi-Fi |
+| `MON_WIFI_SSID` / `MON_WIFI_PSK` | vide | repli `wifi_provision` (recrée le profil) — dans `~/.config/pidog/monitor.env` (`chmod 600`) |
 | `MON_PING_HOSTS` | `1.1.1.1 8.8.8.8` | test WAN |
 | `MON_DNS_HOST` | `github.com` | test DNS |
 | `MON_SSH_CHECK` | `banner` | `banner`, `port` ou `off` |

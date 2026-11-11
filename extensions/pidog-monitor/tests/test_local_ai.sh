@@ -74,7 +74,7 @@ echo "4. grammaire : JSON + toutes les actions, jamais reboot"
 setup
 "$AI" --print-grammar > "$T/grammar" 2>/dev/null
 check "racine JSON" "grep -q '^root ::=' '$T/grammar'"
-for action in rfkill_unblock wifi_reapply wifi_up nm_restart dns_restart tailscale_restart \
+for action in rfkill_unblock wifi_reapply wifi_provision wifi_up nm_restart dns_restart tailscale_restart \
               tailscale_up ssh_restart bluetooth_restart audio_restart none; do
     check "action $action" "grep -q '$action' '$T/grammar'"
 done
